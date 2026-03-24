@@ -2,9 +2,10 @@ import argparse
 import importlib
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
-import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional
@@ -72,11 +73,75 @@ IMPORT_NAME_MAP: Dict[str, str] = {
     "scikit-learn": "sklearn",
 }
 
-PIP_BASE_CMD = [sys.executable, "-m", "pip"]
 PIP_COMMON_FLAGS = [
     "--disable-pip-version-check",
     "--no-input",
 ]
+
+
+def is_frozen_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def can_run_python_cmd(cmd: List[str]) -> bool:
+    try:
+        result = subprocess.run(
+            cmd + ["-c", "import sys;print(sys.executable)"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def resolve_python_cmd(user_python: Optional[str] = None) -> List[str]:
+    """
+    选择用于安装/检查第三方库的目标 Python 命令。
+    - 源码运行默认使用当前解释器
+    - exe 运行默认自动探测系统 Python
+    """
+    if user_python:
+        cmd = [user_python]
+        if can_run_python_cmd(cmd):
+            return cmd
+        raise RuntimeError(f"指定的 Python 不可用: {user_python}")
+
+    # 非打包运行时，默认直接使用当前 Python
+    if not is_frozen_app():
+        return [sys.executable]
+
+    candidates: List[List[str]] = []
+
+    env_python = os.environ.get("ENV_TOOL_PYTHON", "").strip()
+    if env_python:
+        candidates.append([env_python])
+
+    exe_path = Path(sys.executable).resolve()
+    candidates.extend(
+        [
+            [str(exe_path.parent / "python.exe")],
+            [str(exe_path.parent.parent / "python.exe")],
+        ]
+    )
+
+    if shutil.which("py"):
+        candidates.append(["py", "-3"])
+    if shutil.which("python"):
+        candidates.append(["python"])
+
+    for cmd in candidates:
+        if can_run_python_cmd(cmd):
+            return cmd
+
+    raise RuntimeError(
+        "未找到可用的 Python 解释器。请安装 Python，或使用 --python 显式指定。"
+    )
+
+
+def pip_base_cmd(python_cmd: List[str]) -> List[str]:
+    return python_cmd + ["-m", "pip"]
 
 
 # =========================
@@ -157,6 +222,10 @@ def unique_preserve_order(items: Iterable[str]) -> List[str]:
 
 def current_python() -> str:
     return sys.executable
+
+
+def render_python_cmd(python_cmd: List[str]) -> str:
+    return " ".join(python_cmd)
 
 
 def save_json_report(path: str, data: Dict) -> None:
@@ -256,16 +325,16 @@ def run_command(
 # =========================
 # 安装逻辑
 # =========================
-def upgrade_pip(dry_run: bool = False) -> bool:
-    cmd = PIP_BASE_CMD + ["install", "--upgrade", "pip"] + PIP_COMMON_FLAGS
+def upgrade_pip(python_cmd: List[str], dry_run: bool = False) -> bool:
+    cmd = pip_base_cmd(python_cmd) + ["install", "--upgrade", "pip"] + PIP_COMMON_FLAGS
     result = run_command(cmd, dry_run=dry_run, capture_output=True)
     if result.returncode != 0 and result.stderr:
         print(result.stderr.strip())
     return result.returncode == 0
 
 
-def is_package_installed(package_name: str) -> bool:
-    cmd = PIP_BASE_CMD + ["show", package_name]
+def is_package_installed(package_name: str, python_cmd: List[str]) -> bool:
+    cmd = pip_base_cmd(python_cmd) + ["show", package_name]
     result = subprocess.run(
         cmd,
         stdout=subprocess.DEVNULL,
@@ -275,20 +344,29 @@ def is_package_installed(package_name: str) -> bool:
     return result.returncode == 0
 
 
-def install_packages(packages: List[str], dry_run: bool = False) -> subprocess.CompletedProcess:
+def install_packages(
+    packages: List[str],
+    python_cmd: List[str],
+    dry_run: bool = False,
+) -> subprocess.CompletedProcess:
     if not packages:
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-    cmd = PIP_BASE_CMD + ["install"] + packages + PIP_COMMON_FLAGS
+    cmd = pip_base_cmd(python_cmd) + ["install"] + packages + PIP_COMMON_FLAGS
     return run_command(cmd, dry_run=dry_run, capture_output=True)
 
 
-def install_one_package(package_name: str, dry_run: bool = False) -> subprocess.CompletedProcess:
-    return install_packages([package_name], dry_run=dry_run)
+def install_one_package(
+    package_name: str,
+    python_cmd: List[str],
+    dry_run: bool = False,
+) -> subprocess.CompletedProcess:
+    return install_packages([package_name], python_cmd=python_cmd, dry_run=dry_run)
 
 
 def install_selected_packages(
     packages: List[str],
     pkg_group_map: Dict[str, str],
+    python_cmd: List[str],
     skip_installed: bool = False,
     dry_run: bool = False,
 ) -> InstallSummary:
@@ -304,7 +382,7 @@ def install_selected_packages(
 
         to_install: List[str] = []
         for pkg in unique_preserve_order(group_packages):
-            if skip_installed and not dry_run and is_package_installed(pkg):
+            if skip_installed and not dry_run and is_package_installed(pkg, python_cmd):
                 print(f"已安装，跳过: {pkg}")
                 summary.skipped.append(
                     InstallResult(package=pkg, ok=True, group=group_name, skipped=True)
@@ -319,7 +397,7 @@ def install_selected_packages(
         print(f"本组待安装包数量: {len(to_install)}")
         print("先尝试批量安装...")
 
-        batch_result = install_packages(to_install, dry_run=dry_run)
+        batch_result = install_packages(to_install, python_cmd=python_cmd, dry_run=dry_run)
         if batch_result.returncode == 0:
             print(f"分组 {group_name} 批量安装成功。")
             for pkg in to_install:
@@ -334,7 +412,7 @@ def install_selected_packages(
             print(batch_result.stderr.strip()[:2000])
 
         for pkg in to_install:
-            result = install_one_package(pkg, dry_run=dry_run)
+            result = install_one_package(pkg, python_cmd=python_cmd, dry_run=dry_run)
             if result.returncode == 0:
                 print(f"安装成功: {pkg}")
                 summary.success.append(
@@ -392,14 +470,81 @@ def get_installed_version(package_name: str) -> str:
         return "unknown"
 
 
-def check_jupyter_cli() -> None:
+def get_installed_version_by_python(package_name: str, python_cmd: List[str]) -> str:
+    cmd = python_cmd + [
+        "-c",
+        (
+            "import sys; "
+            "from importlib.metadata import version as v; "
+            "name=sys.argv[1]; "
+            "print(v(name), end='')"
+        ),
+        package_name,
+    ]
+    result = run_command(cmd, dry_run=False, capture_output=True)
+    if result.returncode == 0:
+        return (result.stdout or "").strip() or "unknown"
+    return "unknown"
+
+
+def check_jupyter_cli(python_cmd: List[str]) -> None:
     result = run_command(
-        [sys.executable, "-m", "jupyter", "--version"],
+        python_cmd + ["-m", "jupyter", "--version"],
         dry_run=False,
         capture_output=True,
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "jupyter CLI 不可用").strip())
+
+
+def check_one_package_by_python(package_name: str, python_cmd: List[str]) -> CheckResult:
+    version = get_installed_version_by_python(package_name, python_cmd)
+    import_name = resolve_import_name(package_name)
+
+    try:
+        if package_name == "jupyter":
+            check_jupyter_cli(python_cmd)
+            return CheckResult(
+                package=package_name,
+                import_name="jupyter(cli)",
+                ok=True,
+                version=version,
+            )
+
+        check_cmd = python_cmd + [
+            "-c",
+            (
+                "import importlib,sys;"
+                "name=sys.argv[1];"
+                "importlib.import_module(name)"
+            ),
+            import_name,
+        ]
+        result = run_command(check_cmd, dry_run=False, capture_output=True)
+        if result.returncode == 0:
+            return CheckResult(
+                package=package_name,
+                import_name=import_name,
+                ok=True,
+                version=version,
+            )
+
+        error_text = (result.stderr or result.stdout or "导入失败").strip()
+        return CheckResult(
+            package=package_name,
+            import_name=import_name,
+            ok=False,
+            version=version,
+            error=error_text[:1000],
+        )
+    except Exception as e:
+        return CheckResult(
+            package=package_name,
+            import_name="jupyter(cli)" if package_name == "jupyter" else import_name,
+            ok=False,
+            version=version,
+            error=f"{type(e).__name__}: {e}",
+        )
 
 
 def smoke_test_numpy(module) -> None:
@@ -413,9 +558,8 @@ def smoke_test_pandas(module) -> None:
 
 
 def smoke_test_matplotlib(module) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    module.use("Agg")
+    plt = importlib.import_module("matplotlib.pyplot")
 
     fig = plt.figure()
     ax = fig.add_subplot(111)
@@ -482,13 +626,13 @@ def smoke_test_tqdm(module) -> None:
 
 
 def smoke_test_scipy(module) -> None:
-    import scipy.linalg
-    det = scipy.linalg.det([[1, 0], [0, 1]])
+    det = module.linalg.det([[1, 0], [0, 1]])
     assert round(float(det), 6) == 1.0
 
 
 def smoke_test_sklearn(module) -> None:
-    from sklearn.linear_model import LinearRegression
+    linear_model = importlib.import_module("sklearn.linear_model")
+    LinearRegression = getattr(linear_model, "LinearRegression")
 
     X = [[1], [2], [3]]
     y = [2, 4, 6]
@@ -498,8 +642,8 @@ def smoke_test_sklearn(module) -> None:
 
 
 def smoke_test_statsmodels(module) -> None:
-    import numpy as np
-    import statsmodels.api as sm
+    np = importlib.import_module("numpy")
+    sm = importlib.import_module("statsmodels.api")
 
     X = np.array([1, 2, 3, 4], dtype=float)
     y = np.array([2, 4, 6, 8], dtype=float)
@@ -521,13 +665,13 @@ def smoke_test_networkx(module) -> None:
 
 
 def smoke_test_plotly(module) -> None:
-    import plotly.graph_objects as go
+    go = importlib.import_module("plotly.graph_objects")
     fig = go.Figure(data=go.Scatter(x=[1, 2], y=[3, 4]))
     _ = fig.to_dict()
 
 
 def smoke_test_bokeh(module) -> None:
-    from bokeh.plotting import figure
+    figure = getattr(importlib.import_module("bokeh.plotting"), "figure")
     p = figure(title="demo")
     p.line([1, 2], [3, 4])
     assert p.title.text == "demo"
@@ -545,7 +689,7 @@ def smoke_test_bs4(module) -> None:
 
 
 def smoke_test_lxml(module) -> None:
-    from lxml import etree
+    etree = importlib.import_module("lxml.etree")
     root = etree.fromstring(b"<root><a>1</a></root>")
     assert root.tag == "root"
 
@@ -556,8 +700,7 @@ def smoke_test_torch(module) -> None:
 
 
 def smoke_test_transformers(module) -> None:
-    from transformers import AutoConfig
-    assert AutoConfig is not None
+    assert getattr(module, "AutoConfig", None) is not None
 
 
 def smoke_test_datasets(module) -> None:
@@ -594,12 +737,15 @@ SMOKE_TESTS: Dict[str, Callable] = {
 }
 
 
-def check_one_package(package_name: str) -> CheckResult:
+def check_one_package(package_name: str, python_cmd: Optional[List[str]] = None) -> CheckResult:
+    if python_cmd:
+        return check_one_package_by_python(package_name, python_cmd)
+
     version = get_installed_version(package_name)
 
     try:
         if package_name == "jupyter":
-            check_jupyter_cli()
+            check_jupyter_cli([sys.executable])
             return CheckResult(
                 package=package_name,
                 import_name="jupyter(cli)",
@@ -631,12 +777,15 @@ def check_one_package(package_name: str) -> CheckResult:
         )
 
 
-def check_selected_packages(packages: List[str]) -> CheckSummary:
+def check_selected_packages(
+    packages: List[str],
+    python_cmd: Optional[List[str]] = None,
+) -> CheckSummary:
     summary = CheckSummary()
 
     print_header("开始逐个检查")
     for package_name in packages:
-        result = check_one_package(package_name)
+        result = check_one_package(package_name, python_cmd=python_cmd)
         if result.ok:
             print(
                 f"[OK] {result.package} (import={result.import_name}, version={result.version})"
@@ -720,6 +869,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="把最终结果写入 JSON 文件，例如 report.json",
     )
+    parser.add_argument(
+        "--python",
+        default=None,
+        help="指定目标 Python 路径（用于安装/检查），例如 C:\\Python313\\python.exe",
+    )
+    parser.add_argument(
+        "--pause-on-exit",
+        action="store_true",
+        help="程序结束前等待回车（适合双击 exe 使用）",
+    )
     return parser.parse_args()
 
 
@@ -727,8 +886,16 @@ def main() -> int:
     args = parse_args()
 
     print_header("Python 环境安装 / 检查工具")
-    print(f"当前 Python 路径: {current_python()}")
+    print(f"当前运行时路径: {current_python()}")
     print(f"运行模式: {args.mode}")
+
+    try:
+        python_cmd = resolve_python_cmd(args.python)
+    except RuntimeError as e:
+        print(f"解释器错误: {e}")
+        return 2
+
+    print(f"目标 Python 命令: {render_python_cmd(python_cmd)}")
 
     try:
         packages = resolve_packages(args)
@@ -752,7 +919,7 @@ def main() -> int:
 
         if not args.skip_pip_upgrade:
             print_header("先升级 pip")
-            pip_ok = upgrade_pip(dry_run=args.dry_run)
+            pip_ok = upgrade_pip(python_cmd=python_cmd, dry_run=args.dry_run)
             if not pip_ok:
                 print("警告：pip 升级失败，但继续安装其他包。")
         else:
@@ -766,6 +933,7 @@ def main() -> int:
         install_summary = install_selected_packages(
             packages=packages,
             pkg_group_map=pkg_group_map,
+            python_cmd=python_cmd,
             skip_installed=args.skip_installed,
             dry_run=args.dry_run,
         )
@@ -773,12 +941,17 @@ def main() -> int:
 
     if args.mode in ("all", "check"):
         print_header("[检查阶段]")
-        check_summary = check_selected_packages(packages)
+        subprocess_mode = python_cmd != [sys.executable]
+        check_summary = check_selected_packages(
+            packages,
+            python_cmd=python_cmd if subprocess_mode else None,
+        )
         print_check_summary(check_summary)
 
     if args.json_report:
         report = {
             "python": current_python(),
+            "target_python_cmd": python_cmd,
             "mode": args.mode,
             "selected_groups": selected_groups,
             "packages": packages,
@@ -795,4 +968,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_code = main()
+    if "--pause-on-exit" in sys.argv:
+        try:
+            input("\n执行完毕，按回车键退出...")
+        except EOFError:
+            pass
+    sys.exit(exit_code)
