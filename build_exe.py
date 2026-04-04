@@ -1,4 +1,5 @@
 import argparse
+import struct
 import shutil
 import subprocess
 import sys
@@ -27,7 +28,57 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_console(project_root: Path) -> int:
+def ensure_brand_icon(project_root: Path) -> Path:
+    """生成内置 ICO 图标（16x16），用于 PyInstaller 的 EXE 品牌图标。"""
+    icon_dir = project_root / "assets" / "icons"
+    icon_dir.mkdir(parents=True, exist_ok=True)
+    icon_path = icon_dir / "envtool.ico"
+
+    # ICO 文件头
+    width, height = 16, 16
+    xor_size = width * height * 4
+    and_size = height * 4  # 1bpp mask，按 32bit 对齐
+    image_size = 40 + xor_size + and_size
+
+    header = struct.pack("<HHH", 0, 1, 1)
+    entry = struct.pack("<BBBBHHII", width, height, 0, 0, 1, 32, image_size, 22)
+
+    # BITMAPINFOHEADER
+    info = struct.pack(
+        "<IIIHHIIIIII",
+        40,
+        width,
+        height * 2,
+        1,
+        32,
+        0,
+        xor_size,
+        0,
+        0,
+        0,
+        0,
+    )
+
+    # 纯色蓝底 + 白色内方块（BGRA，底向上）
+    blue = bytes([0xE3, 0x71, 0x00, 0xFF])
+    white = bytes([0xFF, 0xFF, 0xFF, 0xFF])
+    pixels = bytearray()
+    for y in range(height - 1, -1, -1):
+        for x in range(width):
+            if 4 <= x <= 11 and 4 <= y <= 11:
+                if 6 <= x <= 9 and 6 <= y <= 9:
+                    pixels.extend(blue)
+                else:
+                    pixels.extend(white)
+            else:
+                pixels.extend(blue)
+
+    and_mask = b"\x00" * and_size
+    icon_path.write_bytes(header + entry + info + bytes(pixels) + and_mask)
+    return icon_path
+
+
+def build_console(project_root: Path, icon_path: Path) -> int:
     entry_file = project_root / "env_manager.py"
     if not entry_file.exists():
         print(f"未找到入口文件: {entry_file}")
@@ -43,6 +94,8 @@ def build_console(project_root: Path) -> int:
         "--console",
         "--name",
         "EnvTool",
+        "--icon",
+        str(icon_path),
         "--specpath",
         str(project_root / "build" / "spec"),
         str(entry_file),
@@ -50,7 +103,7 @@ def build_console(project_root: Path) -> int:
     return run_cmd(cmd)
 
 
-def build_gui(project_root: Path) -> int:
+def build_gui(project_root: Path, icon_path: Path) -> int:
     entry_file = project_root / "env_tool_gui.py"
     if not entry_file.exists():
         print(f"未找到入口文件: {entry_file}")
@@ -66,6 +119,8 @@ def build_gui(project_root: Path) -> int:
         "--windowed",
         "--name",
         "EnvToolGUI",
+        "--icon",
+        str(icon_path),
         "--add-data",
         f"{project_root / 'env_manager.py'};.",
         "--specpath",
@@ -94,15 +149,18 @@ def main() -> int:
     else:
         print("已跳过清理目录。")
 
+    icon_path = ensure_brand_icon(project_root)
+    print(f"已准备图标资源: {icon_path}")
+
     print("[3/4] 开始打包")
     build_codes: list[int] = []
     if args.target in ("all", "console"):
         print("\n--- 打包控制台版 EnvTool.exe ---")
-        build_codes.append(build_console(project_root))
+        build_codes.append(build_console(project_root, icon_path))
 
     if args.target in ("all", "gui"):
         print("\n--- 打包图形版 EnvToolGUI.exe ---")
-        build_codes.append(build_gui(project_root))
+        build_codes.append(build_gui(project_root, icon_path))
 
     if any(code != 0 for code in build_codes):
         print("\n至少一个目标打包失败。")

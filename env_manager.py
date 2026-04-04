@@ -3,12 +3,17 @@ import importlib
 import io
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
+import venv
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 try:
     from importlib.metadata import version as pkg_version
@@ -78,6 +83,19 @@ PIP_COMMON_FLAGS = [
     "--no-input",
 ]
 
+APP_VERSION = "1.2.0"
+GITHUB_REPO_OWNER = "wzgig"
+GITHUB_REPO_NAME = "env_tool"
+
+
+@dataclass
+class PipInstallOptions:
+    index_url: Optional[str] = None
+    extra_index_urls: List[str] = field(default_factory=list)
+    trusted_hosts: List[str] = field(default_factory=list)
+    timeout: Optional[int] = None
+    retries: Optional[int] = None
+
 
 def is_frozen_app() -> bool:
     return bool(getattr(sys, "frozen", False))
@@ -90,33 +108,87 @@ def can_run_python_cmd(cmd: List[str]) -> bool:
             check=False,
             text=True,
             capture_output=True,
+            timeout=8,
         )
         return result.returncode == 0
     except Exception:
         return False
 
 
-def resolve_python_cmd(user_python: Optional[str] = None) -> List[str]:
-    """
-    选择用于安装/检查第三方库的目标 Python 命令。
-    - 源码运行默认使用当前解释器
-    - exe 运行默认自动探测系统 Python
-    """
-    if user_python:
-        cmd = [user_python]
-        if can_run_python_cmd(cmd):
-            return cmd
-        raise RuntimeError(f"指定的 Python 不可用: {user_python}")
+def split_python_spec(spec: str) -> List[str]:
+    """把用户输入的 Python 命令规范化为参数列表。"""
+    text = (spec or "").strip()
+    if not text:
+        return []
+    try:
+        return shlex.split(text, posix=False)
+    except Exception:
+        return [text]
 
-    # 非打包运行时，默认直接使用当前 Python
-    if not is_frozen_app():
-        return [sys.executable]
 
+def discover_py_launcher_pythons() -> List[List[str]]:
+    """通过 `py -0p` 枚举已安装 Python 路径（Windows）。"""
+    if not shutil.which("py"):
+        return []
+
+    try:
+        result = subprocess.run(
+            ["py", "-0p"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=8,
+        )
+    except Exception:
+        return []
+
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    commands: List[List[str]] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        match = re.search(r"([A-Za-z]:\\[^\s]+python\.exe)", line, re.IGNORECASE)
+        if match:
+            commands.append([match.group(1)])
+    return commands
+
+
+def discover_common_windows_pythons() -> List[List[str]]:
+    """扫描常见安装目录中的 python.exe。"""
+    candidates: List[List[str]] = []
+    roots: List[Path] = []
+
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        roots.append(Path(local_app) / "Programs" / "Python")
+
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        roots.append(Path(program_files) / "Python")
+
+    program_files_x86 = os.environ.get("ProgramFiles(x86)")
+    if program_files_x86:
+        roots.append(Path(program_files_x86) / "Python")
+
+    for root in roots:
+        if not root.exists():
+            continue
+        for python_exe in root.glob("Python*/python.exe"):
+            candidates.append([str(python_exe)])
+
+    return candidates
+
+
+def discover_python_commands() -> List[List[str]]:
+    """发现可作为目标环境的 Python 命令，按优先级排序。"""
     candidates: List[List[str]] = []
 
     env_python = os.environ.get("ENV_TOOL_PYTHON", "").strip()
     if env_python:
-        candidates.append([env_python])
+        parsed = split_python_spec(env_python)
+        if parsed:
+            candidates.append(parsed)
 
     exe_path = Path(sys.executable).resolve()
     candidates.extend(
@@ -126,10 +198,49 @@ def resolve_python_cmd(user_python: Optional[str] = None) -> List[str]:
         ]
     )
 
+    # 优先 `py -3`，避免落到 Python 2
     if shutil.which("py"):
         candidates.append(["py", "-3"])
     if shutil.which("python"):
         candidates.append(["python"])
+    if shutil.which("python3"):
+        candidates.append(["python3"])
+
+    candidates.extend(discover_py_launcher_pythons())
+    candidates.extend(discover_common_windows_pythons())
+
+    deduped: List[List[str]] = []
+    seen = set()
+    for cmd in candidates:
+        if not cmd:
+            continue
+        key = "\u0000".join(x.lower() for x in cmd)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cmd)
+    return deduped
+
+
+def resolve_python_cmd(user_python: Optional[str] = None) -> List[str]:
+    """
+    选择用于安装/检查第三方库的目标 Python 命令。
+    - 源码运行默认使用当前解释器
+    - exe 运行默认自动探测系统 Python
+    """
+    if user_python:
+        cmd = split_python_spec(user_python)
+        if not cmd:
+            raise RuntimeError("--python 不能为空")
+        if can_run_python_cmd(cmd):
+            return cmd
+        raise RuntimeError(f"指定的 Python 不可用: {user_python}")
+
+    # 非打包运行时，默认直接使用当前 Python
+    if not is_frozen_app():
+        return [sys.executable]
+
+    candidates = discover_python_commands()
 
     for cmd in candidates:
         if can_run_python_cmd(cmd):
@@ -142,6 +253,30 @@ def resolve_python_cmd(user_python: Optional[str] = None) -> List[str]:
 
 def pip_base_cmd(python_cmd: List[str]) -> List[str]:
     return python_cmd + ["-m", "pip"]
+
+
+def pip_install_extra_flags(options: Optional[PipInstallOptions] = None) -> List[str]:
+    if options is None:
+        return []
+
+    flags: List[str] = []
+
+    if options.index_url:
+        flags.extend(["--index-url", options.index_url])
+
+    for url in unique_preserve_order(options.extra_index_urls):
+        flags.extend(["--extra-index-url", url])
+
+    for host in unique_preserve_order(options.trusted_hosts):
+        flags.extend(["--trusted-host", host])
+
+    if options.timeout is not None:
+        flags.extend(["--timeout", str(options.timeout)])
+
+    if options.retries is not None:
+        flags.extend(["--retries", str(options.retries)])
+
+    return flags
 
 
 # =========================
@@ -226,6 +361,13 @@ def current_python() -> str:
 
 def render_python_cmd(python_cmd: List[str]) -> str:
     return " ".join(python_cmd)
+
+
+def normalize_version_tag(tag: str) -> str:
+    text = str(tag or "").strip()
+    if text.lower().startswith("v"):
+        text = text[1:]
+    return text
 
 
 def save_json_report(path: str, data: Dict) -> None:
@@ -325,8 +467,17 @@ def run_command(
 # =========================
 # 安装逻辑
 # =========================
-def upgrade_pip(python_cmd: List[str], dry_run: bool = False) -> bool:
-    cmd = pip_base_cmd(python_cmd) + ["install", "--upgrade", "pip"] + PIP_COMMON_FLAGS
+def upgrade_pip(
+    python_cmd: List[str],
+    dry_run: bool = False,
+    options: Optional[PipInstallOptions] = None,
+) -> bool:
+    cmd = (
+        pip_base_cmd(python_cmd)
+        + ["install", "--upgrade", "pip"]
+        + pip_install_extra_flags(options)
+        + PIP_COMMON_FLAGS
+    )
     result = run_command(cmd, dry_run=dry_run, capture_output=True)
     if result.returncode != 0 and result.stderr:
         print(result.stderr.strip())
@@ -348,10 +499,17 @@ def install_packages(
     packages: List[str],
     python_cmd: List[str],
     dry_run: bool = False,
+    options: Optional[PipInstallOptions] = None,
 ) -> subprocess.CompletedProcess:
     if not packages:
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-    cmd = pip_base_cmd(python_cmd) + ["install"] + packages + PIP_COMMON_FLAGS
+    cmd = (
+        pip_base_cmd(python_cmd)
+        + ["install"]
+        + packages
+        + pip_install_extra_flags(options)
+        + PIP_COMMON_FLAGS
+    )
     return run_command(cmd, dry_run=dry_run, capture_output=True)
 
 
@@ -359,8 +517,14 @@ def install_one_package(
     package_name: str,
     python_cmd: List[str],
     dry_run: bool = False,
+    options: Optional[PipInstallOptions] = None,
 ) -> subprocess.CompletedProcess:
-    return install_packages([package_name], python_cmd=python_cmd, dry_run=dry_run)
+    return install_packages(
+        [package_name],
+        python_cmd=python_cmd,
+        dry_run=dry_run,
+        options=options,
+    )
 
 
 def install_selected_packages(
@@ -369,6 +533,7 @@ def install_selected_packages(
     python_cmd: List[str],
     skip_installed: bool = False,
     dry_run: bool = False,
+    options: Optional[PipInstallOptions] = None,
 ) -> InstallSummary:
     summary = InstallSummary()
 
@@ -397,7 +562,12 @@ def install_selected_packages(
         print(f"本组待安装包数量: {len(to_install)}")
         print("先尝试批量安装...")
 
-        batch_result = install_packages(to_install, python_cmd=python_cmd, dry_run=dry_run)
+        batch_result = install_packages(
+            to_install,
+            python_cmd=python_cmd,
+            dry_run=dry_run,
+            options=options,
+        )
         if batch_result.returncode == 0:
             print(f"分组 {group_name} 批量安装成功。")
             for pkg in to_install:
@@ -412,7 +582,12 @@ def install_selected_packages(
             print(batch_result.stderr.strip()[:2000])
 
         for pkg in to_install:
-            result = install_one_package(pkg, python_cmd=python_cmd, dry_run=dry_run)
+            result = install_one_package(
+                pkg,
+                python_cmd=python_cmd,
+                dry_run=dry_run,
+                options=options,
+            )
             if result.returncode == 0:
                 print(f"安装成功: {pkg}")
                 summary.success.append(
@@ -429,6 +604,81 @@ def install_selected_packages(
                         group=group_name,
                         error=error_text,
                     )
+                )
+
+    return summary
+
+
+def install_selected_packages_offline(
+    packages: List[str],
+    pkg_group_map: Dict[str, str],
+    python_cmd: List[str],
+    wheel_dir: str,
+    skip_installed: bool = False,
+    dry_run: bool = False,
+    options: Optional[PipInstallOptions] = None,
+) -> InstallSummary:
+    summary = InstallSummary()
+
+    grouped_packages: Dict[str, List[str]] = {}
+    for pkg in packages:
+        group_name = pkg_group_map.get(pkg, "__custom__")
+        grouped_packages.setdefault(group_name, []).append(pkg)
+
+    for group_name, group_packages in grouped_packages.items():
+        print_header(f"开始离线安装分组: {group_name}")
+
+        to_install: List[str] = []
+        for pkg in unique_preserve_order(group_packages):
+            if skip_installed and not dry_run and is_package_installed(pkg, python_cmd):
+                print(f"已安装，跳过: {pkg}")
+                summary.skipped.append(
+                    InstallResult(package=pkg, ok=True, group=group_name, skipped=True)
+                )
+            else:
+                to_install.append(pkg)
+
+        if not to_install:
+            print(f"分组 {group_name} 无需安装。")
+            continue
+
+        print(f"本组待安装包数量: {len(to_install)}")
+        print(f"离线 wheel 仓库: {wheel_dir}")
+
+        batch_result = offline_install_packages(
+            to_install,
+            python_cmd=python_cmd,
+            wheel_dir=wheel_dir,
+            dry_run=dry_run,
+            options=options,
+        )
+        if batch_result.returncode == 0:
+            print(f"分组 {group_name} 离线批量安装成功。")
+            for pkg in to_install:
+                summary.success.append(InstallResult(package=pkg, ok=True, group=group_name))
+            continue
+
+        print(f"分组 {group_name} 离线批量安装失败。")
+        if batch_result.stderr:
+            print(batch_result.stderr.strip()[:2000])
+
+        for pkg in to_install:
+            result = offline_install_packages(
+                [pkg],
+                python_cmd=python_cmd,
+                wheel_dir=wheel_dir,
+                dry_run=dry_run,
+                options=options,
+            )
+            if result.returncode == 0:
+                print(f"安装成功: {pkg}")
+                summary.success.append(InstallResult(package=pkg, ok=True, group=group_name))
+            else:
+                error_text = (result.stderr or result.stdout or "未知错误").strip()[:1000]
+                print(f"安装失败: {pkg}")
+                print(error_text)
+                summary.failed.append(
+                    InstallResult(package=pkg, ok=False, group=group_name, error=error_text)
                 )
 
     return summary
@@ -495,6 +745,177 @@ def check_jupyter_cli(python_cmd: List[str]) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "jupyter CLI 不可用").strip())
+
+
+def export_requirements_snapshot(
+    python_cmd: List[str],
+    output_path: str,
+    dry_run: bool = False,
+) -> bool:
+    cmd = pip_base_cmd(python_cmd) + ["freeze"]
+    result = run_command(cmd, dry_run=dry_run, capture_output=True)
+    if result.returncode != 0:
+        print((result.stderr or "导出 requirements 失败").strip())
+        return False
+
+    if dry_run:
+        print(f"[DRY-RUN] 将写入快照文件: {output_path}")
+        return True
+
+    Path(output_path).write_text(result.stdout or "", encoding="utf-8")
+    print(f"已导出环境快照: {output_path}")
+    return True
+
+
+def restore_from_snapshot(
+    python_cmd: List[str],
+    snapshot_file: str,
+    dry_run: bool = False,
+    options: Optional[PipInstallOptions] = None,
+) -> bool:
+    path = Path(snapshot_file)
+    if not path.exists():
+        print(f"未找到快照文件: {path}")
+        return False
+
+    cmd = (
+        pip_base_cmd(python_cmd)
+        + ["install", "-r", str(path)]
+        + pip_install_extra_flags(options)
+        + PIP_COMMON_FLAGS
+    )
+    result = run_command(cmd, dry_run=dry_run, capture_output=True)
+    if result.returncode != 0:
+        print((result.stderr or result.stdout or "从快照恢复失败").strip())
+        return False
+
+    print(f"已从快照恢复: {path}")
+    return True
+
+
+def offline_install_packages(
+    packages: List[str],
+    python_cmd: List[str],
+    wheel_dir: str,
+    dry_run: bool = False,
+    options: Optional[PipInstallOptions] = None,
+) -> subprocess.CompletedProcess:
+    wheel_path = Path(wheel_dir)
+    if not wheel_path.exists():
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=2,
+            stdout="",
+            stderr=f"未找到 wheel 仓库目录: {wheel_path}",
+        )
+
+    cmd = (
+        pip_base_cmd(python_cmd)
+        + ["install", "--no-index", "--find-links", str(wheel_path)]
+        + packages
+        + pip_install_extra_flags(options)
+        + PIP_COMMON_FLAGS
+    )
+    return run_command(cmd, dry_run=dry_run, capture_output=True)
+
+
+def create_venv_environment(venv_path: str, with_pip: bool = True) -> Path:
+    target = Path(venv_path).expanduser().resolve()
+    builder = venv.EnvBuilder(with_pip=with_pip, clear=False, symlinks=False, upgrade_deps=False)
+    builder.create(str(target))
+    return target
+
+
+def venv_python_path(venv_path: str) -> Path:
+    base = Path(venv_path).expanduser().resolve()
+    if os.name == "nt":
+        return base / "Scripts" / "python.exe"
+    return base / "bin" / "python"
+
+
+def diagnose_environment(
+    python_cmd: List[str],
+    packages: List[str],
+    output_path: str,
+    dry_run: bool = False,
+) -> bool:
+    report: Dict = {
+        "app_version": APP_VERSION,
+        "current_python": current_python(),
+        "target_python_cmd": python_cmd,
+        "platform": sys.platform,
+        "executable": sys.executable,
+        "python_version": sys.version,
+        "pip_version": None,
+        "network": {},
+        "packages": [],
+    }
+
+    pip_result = run_command(pip_base_cmd(python_cmd) + ["--version"], dry_run=dry_run, capture_output=True)
+    if pip_result.returncode == 0:
+        report["pip_version"] = (pip_result.stdout or pip_result.stderr or "").strip()
+
+    for url in [
+        "https://pypi.org/simple/",
+        "https://github.com/",
+    ]:
+        try:
+            req = Request(url, headers={"User-Agent": f"EnvTool/{APP_VERSION}"})
+            with urlopen(req, timeout=6) as resp:
+                report["network"][url] = {"ok": True, "status": getattr(resp, "status", 200)}
+        except Exception as e:
+            report["network"][url] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    for pkg in unique_preserve_order(packages):
+        result = check_one_package(pkg, python_cmd=python_cmd if python_cmd != [sys.executable] else None)
+        report["packages"].append(result.to_dict())
+
+    if dry_run:
+        print(f"[DRY-RUN] 将写入诊断报告: {output_path}")
+        return True
+
+    Path(output_path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"已写入诊断报告: {output_path}")
+    return True
+
+
+def get_latest_github_release(repo_owner: str, repo_name: str) -> Optional[Dict]:
+    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest"
+    req = Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": f"EnvTool/{APP_VERSION}"})
+    try:
+        with urlopen(req, timeout=8) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except URLError as e:
+        print(f"更新检查失败: {e}")
+    except Exception as e:
+        print(f"更新检查失败: {type(e).__name__}: {e}")
+    return None
+
+
+def check_for_updates(repo_owner: str, repo_name: str) -> Dict:
+    latest = get_latest_github_release(repo_owner, repo_name)
+    if not latest:
+        return {"ok": False, "current_version": APP_VERSION, "latest_version": None, "update_available": False}
+
+    latest_tag = str(latest.get("tag_name", "")).strip()
+    update_available = bool(latest_tag and normalize_version_tag(latest_tag) != normalize_version_tag(APP_VERSION))
+    return {
+        "ok": True,
+        "current_version": APP_VERSION,
+        "latest_version": latest_tag,
+        "update_available": update_available,
+        "release_name": latest.get("name"),
+        "html_url": latest.get("html_url"),
+        "assets": [
+            {
+                "name": asset.get("name"),
+                "browser_download_url": asset.get("browser_download_url"),
+                "size": asset.get("size"),
+            }
+            for asset in latest.get("assets", [])
+            if isinstance(asset, dict)
+        ],
+    }
 
 
 def check_one_package_by_python(package_name: str, python_cmd: List[str]) -> CheckResult:
@@ -828,9 +1249,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["all", "install", "check"],
+        choices=["all", "install", "check", "snapshot", "restore", "offline", "venv", "diagnose", "update-check"],
         default="all",
-        help="运行模式：all=安装后检查，install=只安装，check=只检查",
+        help="运行模式：all=安装后检查，install=只安装，check=只检查，snapshot=导出环境快照，restore=快照恢复，offline=离线安装，venv=创建虚拟环境，diagnose=诊断报告，update-check=检查更新",
     )
     parser.add_argument(
         "--groups",
@@ -879,13 +1300,74 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="程序结束前等待回车（适合双击 exe 使用）",
     )
+    parser.add_argument(
+        "--snapshot-file",
+        default="requirements_snapshot.txt",
+        help="快照模式输出文件路径，默认 requirements_snapshot.txt",
+    )
+    parser.add_argument(
+        "--wheel-dir",
+        default=None,
+        help="离线安装使用的 wheel 仓库目录",
+    )
+    parser.add_argument(
+        "--venv-path",
+        default=None,
+        help="创建虚拟环境的目录路径",
+    )
+    parser.add_argument(
+        "--diag-output",
+        default="diagnostic_report.json",
+        help="诊断模式输出路径，默认 diagnostic_report.json",
+    )
+    parser.add_argument(
+        "--repo-owner",
+        default=GITHUB_REPO_OWNER,
+        help="用于检查更新的 GitHub 仓库 owner",
+    )
+    parser.add_argument(
+        "--repo-name",
+        default=GITHUB_REPO_NAME,
+        help="用于检查更新的 GitHub 仓库名",
+    )
+    parser.add_argument(
+        "--index-url",
+        default=None,
+        help="pip 主镜像源，例如 https://pypi.tuna.tsinghua.edu.cn/simple",
+    )
+    parser.add_argument(
+        "--extra-index-url",
+        nargs="*",
+        default=None,
+        help="pip 额外镜像源，可传多个",
+    )
+    parser.add_argument(
+        "--trusted-host",
+        nargs="*",
+        default=None,
+        help="pip 信任域名，可传多个，例如 pypi.tuna.tsinghua.edu.cn",
+    )
+    parser.add_argument(
+        "--pip-timeout",
+        type=int,
+        default=None,
+        help="pip 网络超时（秒）",
+    )
+    parser.add_argument(
+        "--pip-retries",
+        type=int,
+        default=None,
+        help="pip 重试次数",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    project_root = Path(__file__).resolve().parent
 
     print_header("Python 环境安装 / 检查工具")
+    print(f"程序版本: {APP_VERSION}")
     print(f"当前运行时路径: {current_python()}")
     print(f"运行模式: {args.mode}")
 
@@ -896,6 +1378,33 @@ def main() -> int:
         return 2
 
     print(f"目标 Python 命令: {render_python_cmd(python_cmd)}")
+
+    pip_options = PipInstallOptions(
+        index_url=(args.index_url or "").strip() or None,
+        extra_index_urls=unique_preserve_order(args.extra_index_url or []),
+        trusted_hosts=unique_preserve_order(args.trusted_host or []),
+        timeout=args.pip_timeout,
+        retries=args.pip_retries,
+    )
+
+    if args.mode == "snapshot":
+        print_header("[快照阶段]")
+        ok = export_requirements_snapshot(
+            python_cmd=python_cmd,
+            output_path=args.snapshot_file,
+            dry_run=args.dry_run,
+        )
+        return 0 if ok else 1
+
+    if args.mode == "restore":
+        print_header("[恢复阶段]")
+        ok = restore_from_snapshot(
+            python_cmd=python_cmd,
+            snapshot_file=args.snapshot_file,
+            dry_run=args.dry_run,
+            options=pip_options,
+        )
+        return 0 if ok else 1
 
     try:
         packages = resolve_packages(args)
@@ -913,13 +1422,110 @@ def main() -> int:
 
     install_summary: Optional[InstallSummary] = None
     check_summary: Optional[CheckSummary] = None
+    venv_result: Dict = {}
+
+    if args.mode == "offline":
+        print_header("[离线安装阶段]")
+        wheel_dir = args.wheel_dir or ""
+        if not wheel_dir:
+            print("参数错误：离线安装需要 --wheel-dir 指定本地 wheel 仓库。")
+            return 2
+
+        pkg_group_map = package_to_group_map(
+            selected_groups=selected_groups or [],
+            custom_packages=packages if args.only else None,
+        )
+        install_summary = install_selected_packages_offline(
+            packages=packages,
+            pkg_group_map=pkg_group_map,
+            python_cmd=python_cmd,
+            wheel_dir=wheel_dir,
+            skip_installed=args.skip_installed,
+            dry_run=args.dry_run,
+            options=pip_options,
+        )
+        print_install_summary(install_summary)
+
+    elif args.mode == "venv":
+        print_header("[虚拟环境阶段]")
+        venv_dir = args.venv_path or str((project_root / ".envtool_venv").resolve())
+        try:
+            created = create_venv_environment(venv_dir, with_pip=True)
+            venv_python = venv_python_path(str(created))
+            print(f"已创建虚拟环境: {created}")
+            print(f"虚拟环境 Python: {venv_python}")
+            venv_result = {
+                "venv_path": str(created),
+                "venv_python": str(venv_python),
+            }
+
+            if packages:
+                print_header("在虚拟环境中安装选定包")
+                venv_summary = install_selected_packages(
+                    packages=packages,
+                    pkg_group_map=package_to_group_map(selected_groups=selected_groups or [], custom_packages=packages if args.only else None),
+                    python_cmd=[str(venv_python)],
+                    skip_installed=args.skip_installed,
+                    dry_run=args.dry_run,
+                    options=pip_options,
+                )
+                print_install_summary(venv_summary)
+                install_summary = venv_summary
+        except Exception as e:
+            print(f"创建虚拟环境失败: {type(e).__name__}: {e}")
+            return 1
+
+    elif args.mode == "diagnose":
+        print_header("[诊断阶段]")
+        diag_packages = packages
+        ok = diagnose_environment(
+            python_cmd=python_cmd,
+            packages=diag_packages,
+            output_path=args.diag_output,
+            dry_run=args.dry_run,
+        )
+        if not ok:
+            return 1
+        if args.json_report:
+            save_json_report(
+                args.json_report,
+                {
+                    "mode": "diagnose",
+                    "app_version": APP_VERSION,
+                    "current_python": current_python(),
+                    "target_python_cmd": python_cmd,
+                    "diagnostic_output": args.diag_output,
+                },
+            )
+        return 0
+
+    elif args.mode == "update-check":
+        print_header("[更新检查]")
+        update_info = check_for_updates(args.repo_owner, args.repo_name)
+        print(f"当前版本: {update_info.get('current_version')}")
+        print(f"最新版本: {update_info.get('latest_version')}")
+        print(f"是否有更新: {'是' if update_info.get('update_available') else '否'}")
+        if update_info.get("html_url"):
+            print(f"Release 页面: {update_info.get('html_url')}")
+        if update_info.get("assets"):
+            print("可下载资产:")
+            for asset in update_info["assets"]:
+                print(f"  - {asset.get('name')}: {asset.get('browser_download_url')}")
+        if args.json_report:
+            save_json_report(args.json_report, update_info)
+            print(f"\n已写入 JSON 报告: {args.json_report}")
+        return 0
 
     if args.mode in ("all", "install"):
         print_header("[安装阶段]")
 
         if not args.skip_pip_upgrade:
             print_header("先升级 pip")
-            pip_ok = upgrade_pip(python_cmd=python_cmd, dry_run=args.dry_run)
+            pip_ok = upgrade_pip(
+                python_cmd=python_cmd,
+                dry_run=args.dry_run,
+                options=pip_options,
+            )
             if not pip_ok:
                 print("警告：pip 升级失败，但继续安装其他包。")
         else:
@@ -936,6 +1542,7 @@ def main() -> int:
             python_cmd=python_cmd,
             skip_installed=args.skip_installed,
             dry_run=args.dry_run,
+            options=pip_options,
         )
         print_install_summary(install_summary)
 
@@ -958,6 +1565,17 @@ def main() -> int:
             "install": install_summary.to_dict() if install_summary else None,
             "check": check_summary.to_dict() if check_summary else None,
         }
+        if args.mode == "offline":
+            report["workflow"] = {
+                "type": "offline",
+                "wheel_dir": args.wheel_dir,
+            }
+        if args.mode == "venv":
+            report["workflow"] = {
+                "type": "venv",
+                "venv_path": args.venv_path,
+                "venv_result": venv_result,
+            }
         save_json_report(args.json_report, report)
         print(f"\n已写入 JSON 报告: {args.json_report}")
 
