@@ -60,7 +60,9 @@
 说明：
 
 - 工具会自动探测可用 Python（`py -3`、`python`、常见安装目录），不要求与打包机同版本。
+- 自动探测会先验证目标解释器能正常导入 `urllib.request` 和 `socket`；如果某个 Python 安装损坏或 DLL 冲突，它会被跳过。
 - 若自动探测失败，可在 GUI 中手动选择 `python.exe`，或在命令行使用 `--python` 指定。
+- 如果 `py -3` 指到了异常的 Python 安装，请直接显式指定目标解释器，或设置 `ENV_TOOL_RUNNER_PYTHON`。
 
 推荐双击参数（防止窗口自动关闭）：
 
@@ -112,7 +114,7 @@
 - 新增欢迎页与配置记忆：会自动保存上次使用的页面、模式、路径与参数
 - 新增说明书页面：解释每个功能的作用和使用方式
 - 新增关于页面：查看作者、版本与 GitHub 链接
-- 首页新增作者信息：Zicheng Wang
+- 首页新增作者信息：Zicheng Wang, Tiany Huo <3377386900@qq.com>
 - 组织：MuFeng；联系邮箱：[qqiuqiuhua@gmail.com](mailto:qqiuqiuhua@gmail.com)
 - 新增模板中心：数据分析 / 科研 / 办公 / 离线部署 / 诊断模板
 - 新增更新检查：自动读取 GitHub Releases 最新版本与资产下载地址

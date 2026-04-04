@@ -1,12 +1,15 @@
 import argparse
-import struct
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
 
-
 def run_cmd(cmd: list[str]) -> int:
+    """
+    执行传入的命令列表，并打印执行信息。
+    返回子进程的退出码。
+    """
     print(f"\n>>> {' '.join(cmd)}\n")
     result = subprocess.run(cmd, check=False)
     return result.returncode
@@ -17,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target",
         choices=["all", "console", "gui"],
-        default="all",
+        default="gui",
         help="打包目标：all=同时打包 console+gui，console=仅控制台版，gui=仅图形版",
     )
     parser.add_argument(

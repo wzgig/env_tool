@@ -18,10 +18,37 @@ import threading
 import traceback
 import webbrowser
 import tkinter as tk
+from tkinter import ttk
+import customtkinter as ctk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 from typing import Dict, List
+
+
+
+class CardFrame(ctk.CTkFrame):
+    def __init__(self, master, title=None, **kwargs):
+        kwargs.pop("padding", None)
+        kwargs.pop("style", None)
+        kwargs.setdefault("corner_radius", 10)
+        super().__init__(master, **kwargs)
+        self._content_frame = self
+        if title:
+            label = ctk.CTkLabel(self, text=title, font=ctk.CTkFont(family="Helvetica Neue", size=14, weight="bold"))
+            label.pack(anchor="w", padx=12, pady=(10, 4))
+            self._content_frame = ctk.CTkFrame(self, fg_color="transparent")
+            self._content_frame.pack(fill="both", expand=True, padx=4, pady=(0, 8))
+            self._content_frame.pack = self.pack
+            self._content_frame.grid = self.grid
+            self._content_frame.pack_forget = self.pack_forget
+            self._content_frame.grid_forget = self.grid_forget
+            
+    def pack(self, **kwargs):
+        super().pack(**kwargs)
+        
+    def grid(self, **kwargs):
+        super().grid(**kwargs)
 
 
 class EnvToolGUI:
@@ -29,11 +56,11 @@ class EnvToolGUI:
 
     APP_NAME = "EnvTool"
     APP_VERSION = "1.2.0"
-    AUTHOR_NAME = "Zicheng Wang"
-    AUTHOR_EMAIL = "qqiuqiuhua@gmail.com"
+    AUTHOR_NAME = "Zicheng Wang, Tiany Huo"
+    AUTHOR_EMAIL = "qqiuqiuhua@gmail.com, 3377386900@qq.com"
     AUTHOR_GITHUB = "https://github.com/wzgig"
     ORGANIZATION = "MuFeng"
-    COPYRIGHT_TEXT = "© 2026 MuFeng · Zicheng Wang. All rights reserved."
+    COPYRIGHT_TEXT = "© 2026 MuFeng · Zicheng Wang, Tiany Huo. All rights reserved."
     REPO_OWNER = "wzgig"
     REPO_NAME = "env_tool"
     SETTINGS_FILE_NAME = "settings.json"
@@ -134,18 +161,28 @@ class EnvToolGUI:
         },
     }
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: ctk.CTk) -> None:
         self.root = root
+        ctk.set_appearance_mode("System")
+        ctk.set_default_color_theme("blue")
         self.root.title("EnvTool · Python 库安装与检查")
         self.root.geometry("1080x760")
         self.root.minsize(980, 680)
         self.root.configure(bg="#F5F5F7")
+        self.colors = {"text": "black", "bg": "#F5F5F7", "card": "#FFFFFF", "primary": "#007AFF", "muted_btn": "#E5E5EA", "subtext": "#6E6E73"}
 
-        self.project_root = Path(__file__).resolve().parent
+
+        # 确定真正的绝对工作目录，避免把由于 PyInstaller 的 _MEIPASS 引入的 DLL 污染传递给子系统
+        if getattr(sys, "frozen", False):
+            self.project_root = Path(sys.executable).resolve().parent
+        else:
+            self.project_root = Path(__file__).resolve().parent
+
         self.entry_script = self._resolve_entry_script()
 
         # 当前子进程（执行 env_manager.py）
         self.proc: subprocess.Popen | None = None
+        self.last_exit_code: int | None = None
         # 后台线程 -> 主线程的日志队列
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.poll_job_id: str | None = None
@@ -195,18 +232,17 @@ class EnvToolGUI:
         self.badge_theme_var = tk.StringVar(value="主题: 浅色")
         self.badge_state_var = tk.StringVar(value="状态: 空闲")
         self.active_page_var = tk.StringVar(value="welcome")
-        self.nav_buttons: Dict[str, ttk.Button] = {}
-        self.page_frames: Dict[str, ttk.Frame] = {}
-        self.scroll_canvases: Dict[str, tk.Canvas] = {}
+        self.nav_buttons: Dict[str, ctk.CTkButton] = {}
+        self.page_frames: Dict[str, ctk.CTkFrame] = {}
 
-        self._configure_style()
+        # #  - Removed for CustomTkinter - Removed for CustomTkinter
         self._build_ui()
         self._set_window_icon()
         self._bind_events()
         self._loading_settings = True
         self._apply_preset(self.preset_var.get())
         self._load_settings()
-        self._configure_style()
+        # #  - Removed for CustomTkinter - Removed for CustomTkinter
         self._refresh_cmd_preview()
         self._sync_nav_state()
         self._show_page(self.active_page_var.get())
@@ -225,194 +261,27 @@ class EnvToolGUI:
         """定位 env_manager.py。
 
         - 源码运行：就在当前目录
-        - 打包运行：可能在 _MEIPASS 目录
+        - 打包运行：由于 sys.path[0] 会导致目标 Python 错误加载 _MEIPASS 下的 pyd，必须提取到 TEMP 目录再运行。
         """
         local_candidate = Path(__file__).resolve().parent / "env_manager.py"
-        if local_candidate.exists():
+        if not getattr(sys, "frozen", False) and local_candidate.exists():
             return local_candidate
 
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
             bundled_candidate = Path(meipass) / "env_manager.py"
             if bundled_candidate.exists():
-                return bundled_candidate
+                import tempfile
+                # 创一个临时目录，避免与其他进程冲突，或者复用固定的隔离目录
+                temp_dir = Path(tempfile.gettempdir()) / "EnvTool_Extracted"
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                extracted_script = temp_dir / "env_manager.py"
+                
+                # 覆盖写入，保证最新
+                shutil.copy2(bundled_candidate, extracted_script)
+                return extracted_script
 
         return local_candidate
-
-    def _configure_style(self) -> None:
-        """统一界面风格（Apple-like：克制、轻量、清晰层级）。"""
-        style = ttk.Style(self.root)
-        if "clam" in style.theme_names():
-            style.theme_use("clam")
-
-        if self.dark_mode_var.get():
-            self.colors = {
-                "bg": "#1C1C1E",
-                "card": "#2C2C2E",
-                "line": "#3A3A3C",
-                "text": "#F2F2F7",
-                "subtext": "#AEAEB2",
-                "primary": "#0A84FF",
-                "primary_active": "#409CFF",
-                "danger": "#FF453A",
-                "danger_active": "#FF6961",
-                "muted_btn": "#3A3A3C",
-                "muted_btn_active": "#48484A",
-            }
-        else:
-            # 近似 Apple 设计语言的中性色板
-            self.colors = {
-                "bg": "#F5F5F7",
-                "card": "#FFFFFF",
-                "line": "#E5E5EA",
-                "text": "#1D1D1F",
-                "subtext": "#6E6E73",
-                "primary": "#0071E3",
-                "primary_active": "#0062C4",
-                "danger": "#D70015",
-                "danger_active": "#B60012",
-                "muted_btn": "#F2F2F7",
-                "muted_btn_active": "#E5E5EA",
-            }
-
-        self.root.configure(bg=self.colors["bg"])
-
-        style.configure("App.TFrame", background=self.colors["bg"])
-        style.configure("Card.TFrame", background=self.colors["card"])
-
-        style.configure(
-            "Card.TLabelframe",
-            background=self.colors["card"],
-            bordercolor=self.colors["line"],
-            relief="solid",
-            borderwidth=1,
-        )
-        style.configure(
-            "Card.TLabelframe.Label",
-            background=self.colors["card"],
-            foreground=self.colors["text"],
-            font=("Segoe UI", 10, "bold"),
-        )
-
-        style.configure(
-            "Title.TLabel",
-            background=self.colors["bg"],
-            foreground=self.colors["text"],
-            font=("Segoe UI", 17, "bold"),
-        )
-        style.configure(
-            "Hint.TLabel",
-            background=self.colors["bg"],
-            foreground=self.colors["subtext"],
-            font=("Segoe UI", 9),
-        )
-
-        style.configure("TLabel", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
-        style.configure("TCheckbutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
-
-        style.configure(
-            "Primary.TButton",
-            foreground="#FFFFFF",
-            background=self.colors["primary"],
-            borderwidth=0,
-            padding=(14, 8),
-            font=("Segoe UI", 9, "bold"),
-        )
-        style.map("Primary.TButton", background=[("active", self.colors["primary_active"])])
-
-        style.configure(
-            "Danger.TButton",
-            foreground="#FFFFFF",
-            background=self.colors["danger"],
-            borderwidth=0,
-            padding=(12, 8),
-            font=("Segoe UI", 9, "bold"),
-        )
-        style.map("Danger.TButton", background=[("active", self.colors["danger_active"])])
-
-        style.configure(
-            "Soft.TButton",
-            foreground=self.colors["text"],
-            background=self.colors["muted_btn"],
-            bordercolor=self.colors["line"],
-            borderwidth=1,
-            padding=(10, 7),
-            font=("Segoe UI", 9),
-        )
-        style.map("Soft.TButton", background=[("active", self.colors["muted_btn_active"])])
-
-        style.configure("Sidebar.TFrame", background=self.colors["card"])
-        style.configure(
-            "SidebarTitle.TLabel",
-            background=self.colors["card"],
-            foreground=self.colors["text"],
-            font=("Segoe UI", 12, "bold"),
-        )
-        style.configure(
-            "SidebarHint.TLabel",
-            background=self.colors["card"],
-            foreground=self.colors["subtext"],
-            font=("Segoe UI", 9),
-        )
-        style.configure(
-            "Mode.TButton",
-            foreground=self.colors["text"],
-            background="#FFFFFF",
-            bordercolor=self.colors["line"],
-            borderwidth=1,
-            padding=(10, 7),
-            font=("Segoe UI", 9),
-        )
-        style.map("Mode.TButton", background=[("active", self.colors["muted_btn_active"])])
-
-        style.configure(
-            "Nav.TButton",
-            foreground=self.colors["text"],
-            background="#FFFFFF",
-            bordercolor=self.colors["line"],
-            borderwidth=1,
-            padding=(10, 8),
-            font=("Segoe UI", 9),
-        )
-        style.map("Nav.TButton", background=[("active", self.colors["muted_btn_active"])])
-
-        style.configure(
-            "NavActive.TButton",
-            foreground="#FFFFFF",
-            background=self.colors["primary"],
-            borderwidth=0,
-            padding=(10, 8),
-            font=("Segoe UI", 9, "bold"),
-        )
-        style.map("NavActive.TButton", background=[("active", self.colors["primary_active"])])
-
-        if hasattr(self, "log_text"):
-            self.log_text.configure(
-                bg="#FCFCFD" if not self.dark_mode_var.get() else "#1F1F22",
-                fg=self.colors["text"],
-                insertbackground=self.colors["text"],
-            )
-
-        if hasattr(self, "help_text"):
-            self.help_text.configure(
-                bg="#FCFCFD" if not self.dark_mode_var.get() else "#1F1F22",
-                fg=self.colors["text"],
-                insertbackground=self.colors["text"],
-            )
-
-        if hasattr(self, "badge_mode_label"):
-            self.badge_mode_label.configure(bg=self.colors["muted_btn"], fg=self.colors["text"])
-        if hasattr(self, "badge_theme_label"):
-            self.badge_theme_label.configure(bg=self.colors["muted_btn"], fg=self.colors["text"])
-        if hasattr(self, "badge_state_label"):
-            self.badge_state_label.configure(bg=self.colors["primary"], fg="#FFFFFF")
-        if hasattr(self, "badge_wrap"):
-            self.badge_wrap.configure(bg=self.colors["bg"])
-        for canvas in getattr(self, "scroll_canvases", {}).values():
-            try:
-                canvas.configure(bg=self.colors["bg"])
-            except tk.TclError:
-                pass
 
     def _set_window_icon(self) -> None:
         """设置窗口图标（内置像素图标，避免外部依赖）。"""
@@ -450,21 +319,25 @@ class EnvToolGUI:
 
     def _build_ui(self) -> None:
         """创建界面组件（第二轮：侧边栏 + 工作区分栏）。"""
-        container = ttk.Frame(self.root, padding=14, style="App.TFrame")
+        container = ctk.CTkFrame(self.root)
         container.pack(fill=tk.BOTH, expand=True)
 
-        shell = ttk.Frame(container, style="App.TFrame")
+        shell = ctk.CTkFrame(container)
         shell.pack(fill=tk.BOTH, expand=True)
 
-        # 左侧导航
-        sidebar = ttk.Frame(shell, width=230, padding=10, style="Sidebar.TFrame")
-        sidebar.pack(side=tk.LEFT, fill=tk.Y)
-        sidebar.pack_propagate(False)
+        # 左侧导航外层容器
+        sidebar_container = ctk.CTkFrame(shell, width=230)
+        sidebar_container.pack(side=tk.LEFT, fill=tk.Y)
+        sidebar_container.pack_propagate(False)
 
-        ttk.Label(sidebar, text="EnvTool", style="SidebarTitle.TLabel").pack(anchor=tk.W)
-        ttk.Label(sidebar, text="Python 环境助手", style="SidebarHint.TLabel").pack(anchor=tk.W, pady=(2, 12))
+        self.sidebar_canvas = None
+        sidebar = ctk.CTkScrollableFrame(sidebar_container, fg_color="transparent")
+        sidebar.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        ttk.Label(sidebar, text="页面导航", style="SidebarHint.TLabel").pack(anchor=tk.W)
+        ctk.CTkLabel(sidebar, text="EnvTool").pack(anchor=tk.W)
+        ctk.CTkLabel(sidebar, text="Python 环境助手").pack(anchor=tk.W, pady=(2, 12))
+
+        ctk.CTkLabel(sidebar, text="页面导航").pack(anchor=tk.W)
         for page_id, text in [
             ("welcome", "欢迎"),
             ("config", "配置中心"),
@@ -472,16 +345,16 @@ class EnvToolGUI:
             ("help", "说明书"),
             ("about", "关于"),
         ]:
-            self.nav_buttons[page_id] = ttk.Button(
+            self.nav_buttons[page_id] = ctk.CTkButton(
                 sidebar,
                 text=text,
-                style="Nav.TButton",
                 command=lambda p=page_id: self._show_page(p),
+                corner_radius=8
             )
             self.nav_buttons[page_id].pack(fill=tk.X, pady=(6, 0))
 
-        ttk.Separator(sidebar, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
-        ttk.Label(sidebar, text="快速模式", style="SidebarHint.TLabel").pack(anchor=tk.W)
+        ctk.CTkFrame(sidebar, height=1, fg_color="#C7C7CC").pack(fill=tk.X, pady=14)
+        ctk.CTkLabel(sidebar, text="快速模式").pack(anchor=tk.W)
         for text, mode in [
             ("一键安装+检查", "all"),
             ("仅安装", "install"),
@@ -493,43 +366,41 @@ class EnvToolGUI:
             ("生成诊断", "diagnose"),
             ("检查更新", "update-check"),
         ]:
-            ttk.Button(
+            ctk.CTkButton(
                 sidebar,
                 text=text,
-                style="Mode.TButton",
                 command=lambda m=mode: self._quick_set_mode(m),
+                corner_radius=8
             ).pack(fill=tk.X, pady=(6, 0))
 
-        ttk.Separator(sidebar, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
-        ttk.Label(sidebar, text="快捷操作", style="SidebarHint.TLabel").pack(anchor=tk.W)
-        ttk.Button(sidebar, text="开始执行", style="Primary.TButton", command=self._run).pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(sidebar, text="停止任务", style="Danger.TButton", command=self._stop).pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(sidebar, text="打开报告", style="Soft.TButton", command=self._open_report).pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(sidebar, text="导出日志", style="Soft.TButton", command=self._export_log).pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(sidebar, text="切换深色模式", style="Soft.TButton", command=self._toggle_theme).pack(fill=tk.X, pady=(6, 0))
+        ctk.CTkFrame(sidebar, height=1, fg_color="#C7C7CC").pack(fill=tk.X, pady=14)
+        ctk.CTkLabel(sidebar, text="快捷操作").pack(anchor=tk.W)
+        ctk.CTkButton(sidebar, text="开始执行", command=self._run, corner_radius=8).pack(fill=tk.X, pady=(6, 0))
+        ctk.CTkButton(sidebar, text="停止任务", command=self._stop, corner_radius=8).pack(fill=tk.X, pady=(6, 0))
+        ctk.CTkButton(sidebar, text="打开报告", command=self._open_report, corner_radius=8).pack(fill=tk.X, pady=(6, 0))
+        ctk.CTkButton(sidebar, text="导出日志", command=self._export_log, corner_radius=8).pack(fill=tk.X, pady=(6, 0))
+        ctk.CTkButton(sidebar, text="切换深色模式", command=self._toggle_theme, corner_radius=8).pack(fill=tk.X, pady=(6, 0))
 
-        ttk.Separator(sidebar, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
-        ttk.Label(sidebar, text="快捷键", style="SidebarHint.TLabel").pack(anchor=tk.W)
-        ttk.Label(sidebar, text="Ctrl+R 运行", style="SidebarHint.TLabel").pack(anchor=tk.W, pady=(4, 0))
-        ttk.Label(sidebar, text="Ctrl+L 清空日志", style="SidebarHint.TLabel").pack(anchor=tk.W, pady=(2, 0))
-        ttk.Label(sidebar, text="Ctrl+S 导出日志", style="SidebarHint.TLabel").pack(anchor=tk.W, pady=(2, 0))
+        ctk.CTkFrame(sidebar, height=1, fg_color="#C7C7CC").pack(fill=tk.X, pady=14)
+        ctk.CTkLabel(sidebar, text="快捷键").pack(anchor=tk.W)
+        ctk.CTkLabel(sidebar, text="Ctrl+R 运行").pack(anchor=tk.W, pady=(4, 0))
+        ctk.CTkLabel(sidebar, text="Ctrl+L 清空日志").pack(anchor=tk.W, pady=(2, 0))
+        ctk.CTkLabel(sidebar, text="Ctrl+S 导出日志").pack(anchor=tk.W, pady=(2, 0))
 
         # 右侧主工作区
-        main = ttk.Frame(shell, style="App.TFrame")
+        main = ctk.CTkFrame(shell)
         main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0))
 
-        header = ttk.Frame(main, style="App.TFrame")
+        header = ctk.CTkFrame(main)
         header.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(header, text="EnvTool 图形化安装器", style="Title.TLabel").pack(anchor=tk.W)
-        ttk.Label(
+        ctk.CTkLabel(header, text="EnvTool 图形化安装器").pack(anchor=tk.W)
+        ctk.CTkLabel(
             header,
             text="选择配置并执行任务，实时查看日志与结果摘要",
-            style="Hint.TLabel",
         ).pack(anchor=tk.W, pady=(2, 0))
-        ttk.Label(
+        ctk.CTkLabel(
             header,
             text=f"作者：{self.AUTHOR_NAME} · 组织：{self.ORGANIZATION} · 版本：{self.APP_VERSION}",
-            style="Hint.TLabel",
         ).pack(anchor=tk.W, pady=(2, 0))
 
         badge_wrap = tk.Frame(header, bg=self.colors["bg"])
@@ -542,7 +413,7 @@ class EnvToolGUI:
             fg=self.colors["text"],
             padx=10,
             pady=4,
-            font=("Segoe UI", 9, "bold"),
+            font=(("Helvetica Neue", "Segoe UI", "Arial"), 9, "bold"),
         )
         self.badge_mode_label.pack(side=tk.LEFT)
         self.badge_theme_label = tk.Label(
@@ -552,7 +423,7 @@ class EnvToolGUI:
             fg=self.colors["text"],
             padx=10,
             pady=4,
-            font=("Segoe UI", 9, "bold"),
+            font=(("Helvetica Neue", "Segoe UI", "Arial"), 9, "bold"),
         )
         self.badge_theme_label.pack(side=tk.LEFT, padx=(8, 0))
         self.badge_state_label = tk.Label(
@@ -562,80 +433,80 @@ class EnvToolGUI:
             fg="#FFFFFF",
             padx=10,
             pady=4,
-            font=("Segoe UI", 9, "bold"),
+            font=(("Helvetica Neue", "Segoe UI", "Arial"), 9, "bold"),
         )
         self.badge_state_label.pack(side=tk.LEFT, padx=(8, 0))
 
-        cards = ttk.Frame(main, style="App.TFrame")
+        cards = ctk.CTkFrame(main)
         cards.pack(fill=tk.X, pady=(0, 8))
-        status_card = ttk.LabelFrame(cards, text="运行状态", padding=8, style="Card.TLabelframe")
+        status_card = CardFrame(cards, title="运行状态")._content_frame
         status_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        ttk.Label(status_card, textvariable=self.status_var).pack(anchor=tk.W)
-        summary_card = ttk.LabelFrame(cards, text="结果摘要", padding=8, style="Card.TLabelframe")
+        ctk.CTkLabel(status_card, textvariable=self.status_var).pack(anchor=tk.W)
+        summary_card = CardFrame(cards, title="结果摘要")._content_frame
         summary_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
-        ttk.Label(summary_card, textvariable=self.summary_var).pack(anchor=tk.W)
-        update_card = ttk.LabelFrame(cards, text="更新", padding=8, style="Card.TLabelframe")
+        ctk.CTkLabel(summary_card, textvariable=self.summary_var).pack(anchor=tk.W)
+        update_card = CardFrame(cards, title="更新")._content_frame
         update_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
-        ttk.Label(update_card, textvariable=self.update_status_var).pack(anchor=tk.W)
-        ttk.Button(update_card, text="检查更新", style="Soft.TButton", command=self._check_update_ui).pack(anchor=tk.W, pady=(6, 0))
+        ctk.CTkLabel(update_card, textvariable=self.update_status_var).pack(anchor=tk.W)
+        ctk.CTkButton(update_card, text="检查更新", command=self._check_update_ui, corner_radius=8).pack(anchor=tk.W, pady=(6, 0))
 
-        self.page_hint = ttk.Label(main, text="", style="Hint.TLabel")
+        self.page_hint = ctk.CTkLabel(main, text="")
         self.page_hint.pack(fill=tk.X, pady=(0, 8))
 
-        workspace = ttk.Notebook(main)
+        workspace = ctk.CTkTabview(main)
         workspace.pack(fill=tk.BOTH, expand=True)
         self.workspace = workspace
 
-        welcome_tab, welcome_body, welcome_canvas = self._create_scrollable_tab(workspace)
-        config_tab, config_body, config_canvas = self._create_scrollable_tab(workspace)
-        run_tab = ttk.Frame(workspace, style="App.TFrame", padding=8)
-        help_tab = ttk.Frame(workspace, style="App.TFrame", padding=8)
-        about_tab, about_body, about_canvas = self._create_scrollable_tab(workspace)
-        workspace.add(welcome_tab, text="欢迎")
-        workspace.add(config_tab, text="配置中心")
-        workspace.add(run_tab, text="运行与日志")
-        workspace.add(help_tab, text="说明书")
-        workspace.add(about_tab, text="关于")
+        welcome_tab = workspace.add("欢迎")
+        config_tab = workspace.add("配置中心")
+        run_tab = workspace.add("运行与日志")
+        help_tab = workspace.add("说明书")
+        about_tab = workspace.add("关于")
 
-        self.scroll_canvases = {
-            "welcome": welcome_canvas,
-            "config": config_canvas,
-            "about": about_canvas,
-        }
+        welcome_body = ctk.CTkScrollableFrame(welcome_tab, fg_color="transparent")
+        welcome_body.pack(fill="both", expand=True)
+        config_body = ctk.CTkScrollableFrame(config_tab, fg_color="transparent")
+        config_body.pack(fill="both", expand=True)
+        about_body = ctk.CTkScrollableFrame(about_tab, fg_color="transparent")
+        about_body.pack(fill="both", expand=True)
+        
+        welcome_canvas = config_canvas = about_canvas = None
+
+        self.scroll_canvases = {}
 
         self.page_frames = {"welcome": welcome_tab, "config": config_tab, "run": run_tab, "help": help_tab, "about": about_tab}
 
         # 欢迎页
-        welcome_cards = ttk.Frame(welcome_body, style="App.TFrame")
+        welcome_cards = ctk.CTkFrame(welcome_body)
         welcome_cards.pack(fill=tk.BOTH, expand=True)
 
-        intro = ttk.LabelFrame(welcome_cards, text="快速开始", padding=12, style="Card.TLabelframe")
+        intro = CardFrame(welcome_cards, title="快速开始")._content_frame
         intro.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(
+        ctk.CTkLabel(
             intro,
             text="1. 选择左侧页面或预设\n2. 配置目标 Python / 分组 / 镜像源\n3. 点击开始执行\n4. 在运行页查看日志与结果",
             justify=tk.LEFT,
         ).pack(anchor=tk.W)
 
-        features = ttk.LabelFrame(welcome_cards, text="功能亮点", padding=12, style="Card.TLabelframe")
+        features = CardFrame(welcome_cards, title="功能亮点")._content_frame
         features.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(
+        ctk.CTkLabel(
             features,
             text="• 自动探测多个 Python 解释器\n• 记住上次配置\n• 支持环境快照\n• 支持镜像源与超时重试\n• 支持日志导出与失败包重试",
             justify=tk.LEFT,
         ).pack(anchor=tk.W)
 
-        quick_actions = ttk.LabelFrame(welcome_cards, text="常用操作", padding=12, style="Card.TLabelframe")
+        quick_actions = CardFrame(welcome_cards, title="常用操作")._content_frame
         quick_actions.pack(fill=tk.X, pady=(0, 8))
-        ttk.Button(quick_actions, text="前往配置中心", style="Primary.TButton", command=lambda: self._show_page("config")).pack(side=tk.LEFT)
-        ttk.Button(quick_actions, text="前往运行页", style="Soft.TButton", command=lambda: self._show_page("run")).pack(side=tk.LEFT, padx=8)
-        ttk.Button(quick_actions, text="恢复默认", style="Soft.TButton", command=self._reset_defaults).pack(side=tk.LEFT)
-        ttk.Button(quick_actions, text="说明书", style="Soft.TButton", command=lambda: self._show_page("help")).pack(side=tk.LEFT, padx=8)
-        ttk.Button(quick_actions, text="检查更新", style="Soft.TButton", command=self._check_update_ui).pack(side=tk.LEFT)
+        ctk.CTkButton(quick_actions, text="前往配置中心", command=lambda: self._show_page("config"), corner_radius=8).pack(side=tk.LEFT)
+        ctk.CTkButton(quick_actions, text="前往运行页", command=lambda: self._show_page("run"), corner_radius=8).pack(side=tk.LEFT, padx=8)
+        ctk.CTkButton(quick_actions, text="恢复默认", command=self._reset_defaults, corner_radius=8).pack(side=tk.LEFT)
+        ctk.CTkButton(quick_actions, text="说明书", command=lambda: self._show_page("help"), corner_radius=8).pack(side=tk.LEFT, padx=8)
+        ctk.CTkButton(quick_actions, text="检查更新", command=self._check_update_ui, corner_radius=8).pack(side=tk.LEFT)
 
-        author_card = ttk.LabelFrame(welcome_cards, text="作者与信息", padding=12, style="Card.TLabelframe")
+        author_card = CardFrame(welcome_cards, title="作者与信息")._content_frame
         author_card.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(
+        ctk.CTkLabel(
             author_card,
             text=(
                 f"作者：{self.AUTHOR_NAME}\n"
@@ -648,30 +519,27 @@ class EnvToolGUI:
             justify=tk.LEFT,
         ).pack(anchor=tk.W)
 
-        template_card = ttk.LabelFrame(welcome_cards, text="推荐模板", padding=12, style="Card.TLabelframe")
+        template_card = CardFrame(welcome_cards, title="推荐模板")._content_frame
         template_card.pack(fill=tk.X, pady=(0, 8))
-        ttk.Button(template_card, text="数据分析模板", style="Soft.TButton", command=lambda: self._apply_template("data_analysis")).pack(side=tk.LEFT)
-        ttk.Button(template_card, text="科研模板", style="Soft.TButton", command=lambda: self._apply_template("research")).pack(side=tk.LEFT, padx=8)
-        ttk.Button(template_card, text="办公模板", style="Soft.TButton", command=lambda: self._apply_template("office")).pack(side=tk.LEFT)
-        ttk.Button(template_card, text="离线部署模板", style="Soft.TButton", command=lambda: self._apply_template("offline" )).pack(side=tk.LEFT, padx=8)
-        ttk.Button(template_card, text="诊断模板", style="Soft.TButton", command=lambda: self._apply_template("diagnose")).pack(side=tk.LEFT)
+        ctk.CTkButton(template_card, text="数据分析模板", command=lambda: self._apply_template("data_analysis"), corner_radius=8).pack(side=tk.LEFT)
+        ctk.CTkButton(template_card, text="科研模板", command=lambda: self._apply_template("research"), corner_radius=8).pack(side=tk.LEFT, padx=8)
+        ctk.CTkButton(template_card, text="办公模板", command=lambda: self._apply_template("office"), corner_radius=8).pack(side=tk.LEFT)
+        ctk.CTkButton(template_card, text="离线部署模板", command=lambda: self._apply_template("offline"), corner_radius=8).pack(side=tk.LEFT, padx=8)
+        ctk.CTkButton(template_card, text="诊断模板", command=lambda: self._apply_template("diagnose"), corner_radius=8).pack(side=tk.LEFT)
 
         # 说明书页
-        help_wrap = ttk.Frame(help_tab, style="App.TFrame")
+        help_wrap = ctk.CTkFrame(help_tab)
         help_wrap.pack(fill=tk.BOTH, expand=True)
-        help_text = tk.Text(help_wrap, wrap=tk.WORD, bg="#FCFCFD", fg="#1D1D1F", relief=tk.FLAT, font=("Segoe UI", 10))
+        help_text = ctk.CTkTextbox(help_wrap, wrap=tk.WORD, font=ctk.CTkFont("Helvetica Neue", 13))
         help_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        help_scroll = ttk.Scrollbar(help_wrap, orient=tk.VERTICAL, command=help_text.yview)
-        help_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        help_text.configure(yscrollcommand=help_scroll.set)
         help_text.insert(tk.END, self._build_manual_text())
-        help_text.config(state=tk.DISABLED)
+        help_text.configure(state="disabled")
         self.help_text = help_text
 
         # 关于页
-        about_card = ttk.LabelFrame(about_body, text="关于 EnvTool", padding=12, style="Card.TLabelframe")
+        about_card = CardFrame(about_body, title="关于 EnvTool")._content_frame
         about_card.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(
+        ctk.CTkLabel(
             about_card,
             text=(
                 f"EnvTool v{self.APP_VERSION}\n"
@@ -685,205 +553,166 @@ class EnvToolGUI:
             justify=tk.LEFT,
         ).pack(anchor=tk.W)
 
-        links_card = ttk.LabelFrame(about_body, text="相关链接", padding=12, style="Card.TLabelframe")
+        links_card = CardFrame(about_body, title="相关链接")._content_frame
         links_card.pack(fill=tk.X, pady=(0, 8))
-        ttk.Button(links_card, text="作者主页", style="Soft.TButton", command=self._open_author_home).pack(side=tk.LEFT)
-        ttk.Button(links_card, text="打开 GitHub 仓库", style="Soft.TButton", command=self._open_repo_home).pack(side=tk.LEFT)
-        ttk.Button(links_card, text="打开 Releases", style="Soft.TButton", command=self._open_repo_releases).pack(side=tk.LEFT, padx=8)
+        ctk.CTkButton(links_card, text="作者主页", command=self._open_author_home, corner_radius=8).pack(side=tk.LEFT)
+        ctk.CTkButton(links_card, text="打开 GitHub 仓库", command=self._open_repo_home, corner_radius=8).pack(side=tk.LEFT)
+        ctk.CTkButton(links_card, text="打开 Releases", command=self._open_repo_releases, corner_radius=8).pack(side=tk.LEFT, padx=8)
 
         # 配置中心
-        preset_frame = ttk.LabelFrame(config_body, text="快捷预设", padding=10, style="Card.TLabelframe")
+        preset_frame = CardFrame(config_body, title="快捷预设")._content_frame
         preset_frame.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(preset_frame, text="配置预设").pack(side=tk.LEFT)
-        self.preset_box = ttk.Combobox(
+        ctk.CTkLabel(preset_frame, text="配置预设").pack(side=tk.LEFT)
+        self.preset_box = ctk.CTkComboBox(
             preset_frame,
-            textvariable=self.preset_var,
+            variable=self.preset_var,
             values=list(self.PRESETS.keys()),
-            state="readonly",
-            width=18,
+            state="disabled",
+            width=180,
         )
         self.preset_box.pack(side=tk.LEFT, padx=(8, 8))
-        ttk.Button(preset_frame, text="应用预设", command=self._on_apply_preset, style="Soft.TButton").pack(side=tk.LEFT)
-        ttk.Label(preset_frame, text="（预设不会覆盖 Python 路径与报告路径）", style="Hint.TLabel").pack(side=tk.LEFT, padx=(12, 0))
+        ctk.CTkButton(preset_frame, text="应用预设", command=self._on_apply_preset, corner_radius=8).pack(side=tk.LEFT)
+        ctk.CTkLabel(preset_frame, text="（预设不会覆盖 Python 路径与报告路径）").pack(side=tk.LEFT, padx=(12, 0))
 
-        basic = ttk.LabelFrame(config_body, text="基础配置", padding=10, style="Card.TLabelframe")
+        basic = CardFrame(config_body, title="基础配置")._content_frame
         basic.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(basic, text="运行模式").grid(row=0, column=0, sticky=tk.W)
-        mode_box = ttk.Combobox(
+        ctk.CTkLabel(basic, text="运行模式").grid(row=0, column=0, sticky=tk.W)
+        mode_box = ctk.CTkComboBox(
             basic,
-            textvariable=self.mode_var,
+            variable=self.mode_var,
             values=["all", "install", "check", "snapshot", "restore", "offline", "venv", "diagnose", "update-check"],
-            width=12,
-            state="readonly",
+            width=120,
+            state="normal",
         )
         mode_box.grid(row=0, column=1, sticky=tk.W, padx=(8, 24))
 
-        ttk.Label(basic, text="目标 Python（可选）").grid(row=0, column=2, sticky=tk.W)
-        ttk.Entry(basic, textvariable=self.python_var).grid(row=0, column=3, sticky=tk.EW, padx=8)
-        ttk.Button(basic, text="浏览", command=self._choose_python, style="Soft.TButton").grid(row=0, column=4, sticky=tk.W)
+        ctk.CTkLabel(basic, text="目标 Python（可选）").grid(row=0, column=2, sticky=tk.W)
+        ctk.CTkEntry(basic, textvariable=self.python_var).grid(row=0, column=3, sticky=tk.EW, padx=8)
+        ctk.CTkButton(basic, text="浏览", command=self._choose_python, corner_radius=8).grid(row=0, column=4, sticky=tk.W)
 
-        ttk.Label(basic, text="JSON 报告路径").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(basic, textvariable=self.json_var).grid(row=1, column=1, columnspan=3, sticky=tk.EW, padx=(8, 8), pady=(8, 0))
-        ttk.Button(basic, text="选择", command=self._choose_report_path, style="Soft.TButton").grid(row=1, column=4, sticky=tk.W, pady=(8, 0))
+        ctk.CTkLabel(basic, text="JSON 报告路径").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
+        ctk.CTkEntry(basic, textvariable=self.json_var).grid(row=1, column=1, columnspan=3, sticky=tk.EW, padx=(8, 8), pady=(8, 0))
+        ctk.CTkButton(basic, text="选择", command=self._choose_report_path, corner_radius=8).grid(row=1, column=4, sticky=tk.W, pady=(8, 0))
 
-        ttk.Label(basic, text="快照文件路径（snapshot）").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(basic, textvariable=self.snapshot_var).grid(row=2, column=1, columnspan=3, sticky=tk.EW, padx=(8, 8), pady=(8, 0))
-        ttk.Button(basic, text="选择", command=self._choose_snapshot_path, style="Soft.TButton").grid(row=2, column=4, sticky=tk.W, pady=(8, 0))
+        ctk.CTkLabel(basic, text="快照文件路径（snapshot）").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
+        ctk.CTkEntry(basic, textvariable=self.snapshot_var).grid(row=2, column=1, columnspan=3, sticky=tk.EW, padx=(8, 8), pady=(8, 0))
+        ctk.CTkButton(basic, text="选择", command=self._choose_snapshot_path, corner_radius=8).grid(row=2, column=4, sticky=tk.W, pady=(8, 0))
         basic.columnconfigure(3, weight=1)
 
-        advanced_ext = ttk.LabelFrame(config_body, text="扩展功能", padding=10, style="Card.TLabelframe")
+        advanced_ext = CardFrame(config_body, title="扩展功能")._content_frame
         advanced_ext.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(advanced_ext, text="wheel 仓库目录（offline）").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(advanced_ext, textvariable=self.wheel_dir_var).grid(row=0, column=1, sticky=tk.EW, padx=(8, 0))
-        ttk.Button(advanced_ext, text="选择", command=self._choose_wheel_dir, style="Soft.TButton").grid(row=0, column=2, padx=(8, 0))
+        ctk.CTkLabel(advanced_ext, text="wheel 仓库目录（offline）").grid(row=0, column=0, sticky=tk.W)
+        ctk.CTkEntry(advanced_ext, textvariable=self.wheel_dir_var).grid(row=0, column=1, sticky=tk.EW, padx=(8, 0))
+        ctk.CTkButton(advanced_ext, text="选择", command=self._choose_wheel_dir, corner_radius=8).grid(row=0, column=2, padx=(8, 0))
 
-        ttk.Label(advanced_ext, text="虚拟环境目录（venv）").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(advanced_ext, textvariable=self.venv_path_var).grid(row=1, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
-        ttk.Button(advanced_ext, text="选择", command=self._choose_venv_dir, style="Soft.TButton").grid(row=1, column=2, padx=(8, 0), pady=(8, 0))
+        ctk.CTkLabel(advanced_ext, text="虚拟环境目录（venv）").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
+        ctk.CTkEntry(advanced_ext, textvariable=self.venv_path_var).grid(row=1, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
+        ctk.CTkButton(advanced_ext, text="选择", command=self._choose_venv_dir, corner_radius=8).grid(row=1, column=2, padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(advanced_ext, text="诊断报告路径（diagnose）").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(advanced_ext, textvariable=self.diag_output_var).grid(row=2, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
+        ctk.CTkLabel(advanced_ext, text="诊断报告路径（diagnose）").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
+        ctk.CTkEntry(advanced_ext, textvariable=self.diag_output_var).grid(row=2, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(advanced_ext, text="GitHub 仓库 owner / name（update-check）").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
-        owner_repo = ttk.Frame(advanced_ext, style="Card.TFrame")
+        ctk.CTkLabel(advanced_ext, text="GitHub 仓库 owner / name（update-check）").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
+        owner_repo = ctk.CTkFrame(advanced_ext)
         owner_repo.grid(row=3, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
-        ttk.Entry(owner_repo, textvariable=self.repo_owner_var, width=16).pack(side=tk.LEFT)
-        ttk.Label(owner_repo, text=" /").pack(side=tk.LEFT)
-        ttk.Entry(owner_repo, textvariable=self.repo_name_var, width=18).pack(side=tk.LEFT, padx=(4, 0))
+        ctk.CTkEntry(owner_repo, textvariable=self.repo_owner_var, width=120).pack(side=tk.LEFT)
+        ctk.CTkLabel(owner_repo, text=" /").pack(side=tk.LEFT)
+        ctk.CTkEntry(owner_repo, textvariable=self.repo_name_var, width=120).pack(side=tk.LEFT, padx=(4, 0))
 
         advanced_ext.columnconfigure(1, weight=1)
 
-        option_wrap = ttk.Frame(config_body, style="App.TFrame")
+        option_wrap = ctk.CTkFrame(config_body)
         option_wrap.pack(fill=tk.X, pady=(0, 8))
 
-        groups = ttk.LabelFrame(option_wrap, text="任务分组", padding=10, style="Card.TLabelframe")
+        groups = CardFrame(option_wrap, title="任务分组")._content_frame
         groups.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
 
         col = 0
         for group_key, var in self.group_vars.items():
             label = f"{self.GROUP_LABELS[group_key]} ({group_key})"
-            ttk.Checkbutton(groups, text=label, variable=var).grid(row=0, column=col, sticky=tk.W, padx=6)
+            ctk.CTkCheckBox(groups, text=label, variable=var).grid(row=0, column=col, sticky=tk.W, padx=6)
             col += 1
-        ttk.Checkbutton(groups, text="包含 AI 可选组（optional_ai）", variable=self.include_ai_var).grid(
+        ctk.CTkCheckBox(groups, text="包含 AI 可选组（optional_ai）", variable=self.include_ai_var).grid(
             row=1, column=0, columnspan=4, sticky=tk.W, padx=6, pady=(8, 0)
         )
-        ttk.Button(groups, text="全选分组", command=self._select_all_groups, style="Soft.TButton").grid(row=2, column=0, sticky=tk.W, padx=6, pady=(8, 0))
-        ttk.Button(groups, text="清空分组", command=self._clear_all_groups, style="Soft.TButton").grid(row=2, column=1, sticky=tk.W, padx=6, pady=(8, 0))
+        ctk.CTkButton(groups, text="全选分组", command=self._select_all_groups, corner_radius=8).grid(row=2, column=0, sticky=tk.W, padx=6, pady=(8, 0))
+        ctk.CTkButton(groups, text="清空分组", command=self._clear_all_groups, corner_radius=8).grid(row=2, column=1, sticky=tk.W, padx=6, pady=(8, 0))
 
-        advanced = ttk.LabelFrame(option_wrap, text="高级参数", padding=10, style="Card.TLabelframe")
+        advanced = CardFrame(option_wrap, title="高级参数")._content_frame
         advanced.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
 
-        ttk.Label(advanced, text="仅处理包（--only，空格分隔）").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(advanced, textvariable=self.only_var).grid(row=0, column=1, sticky=tk.EW, padx=(8, 0))
+        ctk.CTkLabel(advanced, text="仅处理包（--only，空格分隔）").grid(row=0, column=0, sticky=tk.W)
+        ctk.CTkEntry(advanced, textvariable=self.only_var).grid(row=0, column=1, sticky=tk.EW, padx=(8, 0))
 
-        ttk.Checkbutton(advanced, text="跳过 pip 升级", variable=self.skip_pip_var).grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Checkbutton(advanced, text="跳过已安装包", variable=self.skip_installed_var).grid(row=1, column=1, sticky=tk.W, pady=(8, 0))
-        ttk.Checkbutton(advanced, text="仅预演（dry-run）", variable=self.dry_run_var).grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
+        ctk.CTkCheckBox(advanced, text="跳过 pip 升级", variable=self.skip_pip_var).grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
+        ctk.CTkCheckBox(advanced, text="跳过已安装包", variable=self.skip_installed_var).grid(row=1, column=1, sticky=tk.W, pady=(8, 0))
+        ctk.CTkCheckBox(advanced, text="仅预演（dry-run）", variable=self.dry_run_var).grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
 
-        ttk.Label(advanced, text="镜像源（--index-url）").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(advanced, textvariable=self.index_url_var).grid(row=3, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
+        ctk.CTkLabel(advanced, text="镜像源（--index-url）").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
+        ctk.CTkEntry(advanced, textvariable=self.index_url_var).grid(row=3, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(advanced, text="额外源（空格分隔）").grid(row=4, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(advanced, textvariable=self.extra_index_var).grid(row=4, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
+        ctk.CTkLabel(advanced, text="额外源（空格分隔）").grid(row=4, column=0, sticky=tk.W, pady=(8, 0))
+        ctk.CTkEntry(advanced, textvariable=self.extra_index_var).grid(row=4, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(advanced, text="信任域名（空格分隔）").grid(row=5, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(advanced, textvariable=self.trusted_host_var).grid(row=5, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
+        ctk.CTkLabel(advanced, text="信任域名（空格分隔）").grid(row=5, column=0, sticky=tk.W, pady=(8, 0))
+        ctk.CTkEntry(advanced, textvariable=self.trusted_host_var).grid(row=5, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(advanced, text="pip 超时/重试").grid(row=6, column=0, sticky=tk.W, pady=(8, 0))
-        timeout_retry = ttk.Frame(advanced, style="Card.TFrame")
+        ctk.CTkLabel(advanced, text="pip 超时/重试").grid(row=6, column=0, sticky=tk.W, pady=(8, 0))
+        timeout_retry = ctk.CTkFrame(advanced)
         timeout_retry.grid(row=6, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
-        ttk.Entry(timeout_retry, textvariable=self.pip_timeout_var, width=10).pack(side=tk.LEFT)
-        ttk.Label(timeout_retry, text=" 秒  ").pack(side=tk.LEFT)
-        ttk.Entry(timeout_retry, textvariable=self.pip_retries_var, width=10).pack(side=tk.LEFT)
-        ttk.Label(timeout_retry, text=" 次").pack(side=tk.LEFT)
+        ctk.CTkEntry(timeout_retry, textvariable=self.pip_timeout_var, width=10).pack(side=tk.LEFT)
+        ctk.CTkLabel(timeout_retry, text=" 秒  ").pack(side=tk.LEFT)
+        ctk.CTkEntry(timeout_retry, textvariable=self.pip_retries_var, width=10).pack(side=tk.LEFT)
+        ctk.CTkLabel(timeout_retry, text=" 次").pack(side=tk.LEFT)
         advanced.columnconfigure(1, weight=1)
 
-        preview = ttk.LabelFrame(config_body, text="命令预览（执行前可确认）", padding=8, style="Card.TLabelframe")
+        preview = CardFrame(config_body, title="命令预览（执行前可确认）")._content_frame
         preview.pack(fill=tk.X, pady=(0, 8))
-        ttk.Entry(preview, textvariable=self.preview_var, state="readonly").pack(fill=tk.X)
+        ctk.CTkEntry(preview, textvariable=self.preview_var, state="disabled").pack(fill=tk.X)
 
         # 运行与日志
-        actions = ttk.LabelFrame(run_tab, text="操作", padding=10, style="Card.TLabelframe")
+        actions = CardFrame(run_tab, title="操作")._content_frame
         actions.pack(fill=tk.X, pady=(0, 8))
 
-        self.run_btn = ttk.Button(actions, text="开始执行", command=self._run, style="Primary.TButton")
+        self.run_btn = ctk.CTkButton(actions, text="开始执行", command=self._run, corner_radius=8)
         self.run_btn.pack(side=tk.LEFT)
 
-        self.stop_btn = ttk.Button(actions, text="停止", command=self._stop, state=tk.DISABLED, style="Danger.TButton")
+        self.stop_btn = ctk.CTkButton(actions, text="停止", command=self._stop, state=tk.DISABLED, corner_radius=8)
         self.stop_btn.pack(side=tk.LEFT, padx=8)
 
-        ttk.Button(actions, text="恢复默认", command=self._reset_defaults, style="Soft.TButton").pack(side=tk.LEFT)
-        ttk.Button(actions, text="打开报告", command=self._open_report, style="Soft.TButton").pack(side=tk.LEFT, padx=8)
-        ttk.Button(actions, text="刷新摘要", command=self._refresh_report_summary, style="Soft.TButton").pack(side=tk.LEFT)
-        ttk.Button(actions, text="失败包重试", command=self._retry_failed_from_report, style="Soft.TButton").pack(side=tk.LEFT, padx=8)
-        ttk.Button(actions, text="导出日志", command=self._export_log, style="Soft.TButton").pack(side=tk.LEFT)
-        ttk.Button(actions, text="清空日志", command=self._clear_log, style="Soft.TButton").pack(side=tk.LEFT)
+        ctk.CTkButton(actions, text="恢复默认", command=self._reset_defaults, corner_radius=8).pack(side=tk.LEFT)
+        ctk.CTkButton(actions, text="打开报告", command=self._open_report, corner_radius=8).pack(side=tk.LEFT, padx=8)
+        ctk.CTkButton(actions, text="刷新摘要", command=self._refresh_report_summary, corner_radius=8).pack(side=tk.LEFT)
+        ctk.CTkButton(actions, text="失败包重试", command=self._retry_failed_from_report, corner_radius=8).pack(side=tk.LEFT, padx=8)
+        ctk.CTkButton(actions, text="导出日志", command=self._export_log, corner_radius=8).pack(side=tk.LEFT)
+        ctk.CTkButton(actions, text="清空日志", command=self._clear_log, corner_radius=8).pack(side=tk.LEFT)
 
-        self.progress = ttk.Progressbar(actions, mode="indeterminate", length=180)
+        self.progress = ctk.CTkProgressBar(actions, mode="indeterminate", width=180)
         self.progress.pack(side=tk.RIGHT, padx=(8, 0))
-        ttk.Label(actions, textvariable=self.status_var).pack(side=tk.RIGHT)
+        ctk.CTkLabel(actions, textvariable=self.status_var).pack(side=tk.RIGHT)
 
-        summary_frame = ttk.Frame(run_tab, style="App.TFrame")
+        summary_frame = ctk.CTkFrame(run_tab)
         summary_frame.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(summary_frame, textvariable=self.summary_var, style="Hint.TLabel").pack(side=tk.LEFT)
+        ctk.CTkLabel(summary_frame, textvariable=self.summary_var).pack(side=tk.LEFT)
 
-        log_frame = ttk.LabelFrame(run_tab, text="执行日志", padding=8, style="Card.TLabelframe")
+        log_frame = CardFrame(run_tab, title="执行日志")._content_frame
         log_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.log_text = tk.Text(
-            log_frame,
-            wrap=tk.WORD,
-            height=24,
-            font=("Cascadia Code", 10),
-            bg="#FCFCFD",
-            fg="#1D1D1F",
-            relief=tk.FLAT,
-            insertbackground="#1D1D1F",
+        self.log_text = ctk.CTkTextbox(log_frame, wrap=tk.WORD, height=400, font=ctk.CTkFont("Cascadia Code", 12),
+            fg_color="#FCFCFD",
+            text_color="#1D1D1F"
         )
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.log_text.tag_configure("ok", foreground="#248A3D")
-        self.log_text.tag_configure("warn", foreground="#B26A00")
-        self.log_text.tag_configure("err", foreground="#D70015")
-        self.log_text.tag_configure("title", foreground="#0A84FF", font=("Cascadia Code", 10, "bold"))
+        self.log_text.tag_config("ok", foreground="#248A3D")
+        self.log_text.tag_config("warn", foreground="#B26A00")
+        self.log_text.tag_config("err", foreground="#D70015")
+        self.log_text.tag_config("title", foreground="#0A84FF")
 
-        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_text.configure(yscrollcommand=scrollbar.set)
+        workspace.configure(command=self._on_tab_changed)
 
-        workspace.bind("<<NotebookTabChanged>>", self._on_tab_changed)
-
-    def _create_scrollable_tab(self, workspace: ttk.Notebook) -> tuple[ttk.Frame, ttk.Frame, tk.Canvas]:
-        """创建带竖向滚动条的页面容器。"""
-        tab = ttk.Frame(workspace, style="App.TFrame")
-
-        canvas = tk.Canvas(
-            tab,
-            bg=self.colors["bg"],
-            highlightthickness=0,
-            borderwidth=0,
-            relief=tk.FLAT,
-        )
-        scrollbar = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        body = ttk.Frame(canvas, style="App.TFrame", padding=8)
-        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
-
-        def _refresh_scroll_region(_event=None) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _sync_body_width(event) -> None:
-            canvas.itemconfigure(body_window, width=event.width)
-
-        body.bind("<Configure>", _refresh_scroll_region)
-        canvas.bind("<Configure>", _sync_body_width)
-
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        return tab, body, canvas
-
+    
     def _bind_events(self) -> None:
         """绑定变量变化与快捷键。"""
         tracked = [
@@ -915,26 +744,6 @@ class EnvToolGUI:
         self.root.bind("<Control-r>", lambda _e: self._run())
         self.root.bind("<Control-l>", lambda _e: self._clear_log())
         self.root.bind("<Control-s>", lambda _e: self._export_log())
-        self.root.bind("<MouseWheel>", self._on_root_mousewheel)
-
-    def _on_root_mousewheel(self, event) -> str | None:
-        canvas = self.scroll_canvases.get(self.active_page_var.get())
-        if not canvas:
-            return None
-
-        delta = event.delta
-        if delta == 0:
-            return None
-
-        step = -(delta // 120)
-        if step == 0:
-            step = -1 if delta > 0 else 1
-
-        try:
-            canvas.yview_scroll(step, "units")
-            return "break"
-        except tk.TclError:
-            return None
 
     def _settings_path(self) -> Path:
         """返回用户配置保存路径。"""
@@ -1041,12 +850,16 @@ class EnvToolGUI:
         finally:
             self._loading_settings = False
 
-    def _show_page(self, page_id: str) -> None:
+    def _show_page(self, page_id: str, **kwargs) -> None:
         if page_id not in self.page_frames:
             return
         self.active_page_var.set(page_id)
-        frame = self.page_frames[page_id]
-        self.workspace.select(frame)
+        mapping = {"welcome": "欢迎", "config": "配置中心", "run": "运行与日志", "help": "说明书", "about": "关于"}
+        if mapping.get(page_id):
+            try:
+                self.workspace.set(mapping[page_id])
+            except Exception:
+                pass
         self._sync_nav_state()
         self._update_page_hint(page_id)
         self._play_page_transition_animation()
@@ -1076,40 +889,36 @@ class EnvToolGUI:
             "help": "说明书：解释每个功能的用途与推荐使用方式。",
             "about": "关于：查看作者信息、版本与项目链接。",
         }
-        self.page_hint.config(text=hint_map.get(page_id, ""))
+        self.page_hint.configure(text=hint_map.get(page_id, ""))
         self._update_top_badges()
 
     def _sync_nav_state(self) -> None:
         active = self.active_page_var.get()
         for page_id, button in self.nav_buttons.items():
             try:
-                button.configure(style="NavActive.TButton" if page_id == active else "Nav.TButton")
+                pass # removed style config
             except tk.TclError:
                 pass
 
     def _on_tab_changed(self, _event=None) -> None:
         try:
-            current = self.workspace.select()
-            if not current:
-                return
-            widget = self.root.nametowidget(current)
+            tab_name = self.workspace.get()
         except Exception:
             return
-
-        for page_id, frame in self.page_frames.items():
-            if widget == frame:
-                self.active_page_var.set(page_id)
-                self._sync_nav_state()
-                self._update_page_hint(page_id)
-                self._schedule_settings_save()
-                break
+        mapping = {"欢迎": "welcome", "配置中心": "config", "运行与日志": "run", "说明书": "help", "关于": "about"}
+        page_id = mapping.get(tab_name)
+        if page_id:
+            self.active_page_var.set(page_id)
+            self._sync_nav_state()
+            self._update_page_hint(page_id)
+            self._schedule_settings_save()
 
     def _mark_settings_dirty(self) -> None:
         self._schedule_settings_save()
 
     def _toggle_theme(self) -> None:
         self.dark_mode_var.set(not self.dark_mode_var.get())
-        self._configure_style()
+        # #  - Removed for CustomTkinter - Removed for CustomTkinter
         self._sync_nav_state()
         self._update_top_badges()
         self._schedule_settings_save()
@@ -1327,6 +1136,22 @@ class EnvToolGUI:
             return [raw]
 
     @staticmethod
+    def _subprocess_env() -> Dict[str, str]:
+        """准备干净的子进程环境变量，避免 PyInstaller 环境污染其他 Python。"""
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
+        
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            meipass_norm = os.path.normcase(os.path.abspath(meipass))
+            paths = env.get("PATH", "").split(os.pathsep)
+            clean_paths = [p for p in paths if p.strip() and os.path.normcase(os.path.abspath(p)) != meipass_norm]
+            env["PATH"] = os.pathsep.join(clean_paths)
+            
+        return env
+
+    @staticmethod
     def _subprocess_hidden_kwargs() -> Dict:
         """尽量隐藏 Windows 下的控制台窗口，避免闪烁。"""
         kwargs: Dict = {}
@@ -1344,9 +1169,10 @@ class EnvToolGUI:
             return False
         try:
             result = subprocess.run(
-                candidate + ["-c", "import sys;print(sys.executable)"],
+                candidate + ["-c", "import socket, urllib.request, sys;print(sys.executable)"],
                 check=False,
                 capture_output=True,
+                env=self._subprocess_env(),
                 text=True,
                 timeout=8,
                 **self._subprocess_hidden_kwargs(),
@@ -1365,6 +1191,7 @@ class EnvToolGUI:
                 check=False,
                 text=True,
                 capture_output=True,
+                env=self._subprocess_env(),
                 timeout=8,
                 **self._subprocess_hidden_kwargs(),
             )
@@ -1623,15 +1450,15 @@ class EnvToolGUI:
 
     def _set_running_state(self, running: bool) -> None:
         """统一切换按钮状态与进度条状态。"""
-        self.run_btn.config(state=tk.DISABLED if running else tk.NORMAL)
-        self.stop_btn.config(state=tk.NORMAL if running else tk.DISABLED)
+        self.run_btn.configure(state=tk.DISABLED if running else tk.NORMAL)
+        self.stop_btn.configure(state=tk.NORMAL if running else tk.DISABLED)
         self.status_var.set("运行中..." if running else "已完成")
         self._update_top_badges()
         if running:
             self.running_anim_phase = 0
             self._stop_running_badge_animation()
             self._animate_running_badge()
-            self.progress.start(10)
+            self.progress.start()
         else:
             self._stop_running_badge_animation()
             self.badge_state_var.set("状态: 空闲")
@@ -1662,7 +1489,7 @@ class EnvToolGUI:
         try:
             # 关键：强制子进程统一使用 UTF-8，避免 Windows 下出现中文乱码。
             # 常见乱码原因是：子进程按 cp936/gbk 输出，而父进程按 utf-8 解码。
-            run_env = os.environ.copy()
+            run_env = self._subprocess_env()
             run_env.setdefault("PYTHONIOENCODING", "utf-8")
             run_env.setdefault("PYTHONUTF8", "1")
 
@@ -1683,6 +1510,7 @@ class EnvToolGUI:
                 self.log_queue.put(line.rstrip("\n"))
 
             code = self.proc.wait()
+            self.log_queue.put(f"__TASK_EXIT__:{code}")
             self.log_queue.put(f"\n[结束] 退出码: {code}")
         except Exception as e:
             self.log_queue.put(f"\n[异常] {type(e).__name__}: {e}")
@@ -1835,13 +1663,25 @@ class EnvToolGUI:
             tag = "title"
 
         if tag:
+            self.log_text.configure(state="normal")
+            self.log_text.configure(state='normal')
             self.log_text.insert(tk.END, text + "\n", tag)
+            self.log_text.configure(state='disabled')
+            self.log_text.configure(state="disabled")
         else:
+            self.log_text.configure(state="normal")
+            self.log_text.configure(state='normal')
             self.log_text.insert(tk.END, text + "\n")
+            self.log_text.configure(state='disabled')
+            self.log_text.configure(state="disabled")
         self.log_text.see(tk.END)
 
     def _clear_log(self) -> None:
+        self.log_text.configure(state="normal")
+        self.log_text.configure(state='normal')
         self.log_text.delete("1.0", tk.END)
+        self.log_text.configure(state='disabled')
+        self.log_text.configure(state="disabled")
 
     def _reset_defaults(self) -> None:
         """恢复默认参数。"""
@@ -1882,7 +1722,19 @@ class EnvToolGUI:
 
             if item == "__TASK_DONE__":
                 self._set_running_state(False)
-                self._refresh_report_summary()
+                if self._resolve_report_path().exists():
+                    self._refresh_report_summary()
+                elif self.last_exit_code not in (None, 0):
+                    self.summary_var.set(f"结果摘要：任务失败，退出码 {self.last_exit_code}")
+                else:
+                    self.summary_var.set("结果摘要：任务已结束，未生成报告")
+                continue
+
+            if item.startswith("__TASK_EXIT__:"):
+                try:
+                    self.last_exit_code = int(item.split(":", 1)[1])
+                except Exception:
+                    self.last_exit_code = None
                 continue
 
             self._append_log(item)
@@ -1927,7 +1779,7 @@ class EnvToolGUI:
 
 
 def main() -> int:
-    root = tk.Tk()
+    root = ctk.CTk()
     EnvToolGUI(root)
     root.mainloop()
     return 0

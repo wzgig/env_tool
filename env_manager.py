@@ -1,3 +1,7 @@
+"""EnvTool 核心环境管理脚本。
+Authors: Zicheng Wang, Tiany Huo <3377386900@qq.com>
+"""
+
 import argparse
 import importlib
 import io
@@ -12,8 +16,6 @@ import venv
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
 try:
     from importlib.metadata import version as pkg_version
@@ -97,21 +99,42 @@ class PipInstallOptions:
     retries: Optional[int] = None
 
 
+def clean_subprocess_env() -> Dict[str, str]:
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        meipass_norm = os.path.normcase(os.path.abspath(meipass))
+        paths = env.get("PATH", "").split(os.pathsep)
+        clean_paths = [p for p in paths if p.strip() and os.path.normcase(os.path.abspath(p)) != meipass_norm]
+        env["PATH"] = os.pathsep.join(clean_paths)
+    return env
+
+
 def is_frozen_app() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
 def can_run_python_cmd(cmd: List[str]) -> bool:
+    """
+    测试给定的 Python 命令能否成功执行，并能正确导入核心库，
+    避免遇到由于环境变量导致 DLL 冲突或损坏的 Python 环境。
+    """
     try:
         result = subprocess.run(
-            cmd + ["-c", "import sys;print(sys.executable)"],
+            cmd + ["-c", "import sys, socket, urllib.request; print(sys.executable)"],
             check=False,
             text=True,
             capture_output=True,
-            timeout=8,
+            timeout=15,
+            env=clean_subprocess_env(),
         )
+        if result.returncode != 0:
+            print(f"[DEBUG] check python failed: {result.stderr}", file=sys.stderr)
         return result.returncode == 0
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG] check python exception: {e}", file=sys.stderr)
         return False
 
 
@@ -138,6 +161,7 @@ def discover_py_launcher_pythons() -> List[List[str]]:
             text=True,
             capture_output=True,
             timeout=8,
+            env=clean_subprocess_env(),
         )
     except Exception:
         return []
@@ -236,8 +260,9 @@ def resolve_python_cmd(user_python: Optional[str] = None) -> List[str]:
             return cmd
         raise RuntimeError(f"指定的 Python 不可用: {user_python}")
 
-    # 非打包运行时，默认直接使用当前 Python
-    if not is_frozen_app():
+    # 非打包运行时，优先复用当前 Python，但如果当前解释器本身已损坏，
+    # 则回退到自动探测，避免脚本在源代码模式下也被同一个坏环境拖死。
+    if not is_frozen_app() and can_run_python_cmd([sys.executable]):
         return [sys.executable]
 
     candidates = discover_python_commands()
@@ -359,6 +384,13 @@ def current_python() -> str:
     return sys.executable
 
 
+def _urllib_request_imports() -> tuple:
+    from urllib.error import URLError
+    from urllib.request import Request, urlopen
+
+    return URLError, Request, urlopen
+
+
 def render_python_cmd(python_cmd: List[str]) -> str:
     return " ".join(python_cmd)
 
@@ -451,6 +483,7 @@ def run_command(
             check=False,
             text=True,
             capture_output=capture_output,
+            env=clean_subprocess_env(),
         )
     except KeyboardInterrupt:
         print("\n用户中断执行。")
@@ -491,6 +524,7 @@ def is_package_installed(package_name: str, python_cmd: List[str]) -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
+        env=clean_subprocess_env(),
     )
     return result.returncode == 0
 
@@ -839,6 +873,8 @@ def diagnose_environment(
     output_path: str,
     dry_run: bool = False,
 ) -> bool:
+    URLError, Request, urlopen = _urllib_request_imports()
+
     report: Dict = {
         "app_version": APP_VERSION,
         "current_python": current_python(),
@@ -880,6 +916,8 @@ def diagnose_environment(
 
 
 def get_latest_github_release(repo_owner: str, repo_name: str) -> Optional[Dict]:
+    URLError, Request, urlopen = _urllib_request_imports()
+
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest"
     req = Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": f"EnvTool/{APP_VERSION}"})
     try:
