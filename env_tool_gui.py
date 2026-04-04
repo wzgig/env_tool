@@ -56,11 +56,11 @@ class EnvToolGUI:
 
     APP_NAME = "EnvTool"
     APP_VERSION = "1.2.0"
-    AUTHOR_NAME = "Zicheng Wang, Tiany Huo"
+    AUTHOR_NAME = "Zicheng Wang (@wzgig), Tiany Huo (@titih258)"
     AUTHOR_EMAIL = "qqiuqiuhua@gmail.com, 3377386900@qq.com"
     AUTHOR_GITHUB = "https://github.com/wzgig"
     ORGANIZATION = "MuFeng"
-    COPYRIGHT_TEXT = "© 2026 MuFeng · Zicheng Wang, Tiany Huo. All rights reserved."
+    COPYRIGHT_TEXT = "© 2026 MuFeng · Zicheng Wang (@wzgig), Tiany Huo (@titih258). All rights reserved."
     REPO_OWNER = "wzgig"
     REPO_NAME = "env_tool"
     SETTINGS_FILE_NAME = "settings.json"

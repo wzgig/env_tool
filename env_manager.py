@@ -1,5 +1,5 @@
 """EnvTool 核心环境管理脚本。
-Authors: Zicheng Wang, Tiany Huo <3377386900@qq.com>
+Authors: Zicheng Wang (@wzgig), Tiany Huo (@titih258) <3377386900@qq.com>
 """
 
 import argparse

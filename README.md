@@ -114,7 +114,7 @@
 - 新增欢迎页与配置记忆：会自动保存上次使用的页面、模式、路径与参数
 - 新增说明书页面：解释每个功能的作用和使用方式
 - 新增关于页面：查看作者、版本与 GitHub 链接
-- 首页新增作者信息：Zicheng Wang, Tiany Huo <3377386900@qq.com>
+- 首页新增作者信息：Zicheng Wang (@wzgig), Tiany Huo (@titih258) <3377386900@qq.com>
 - 组织：MuFeng；联系邮箱：[qqiuqiuhua@gmail.com](mailto:qqiuqiuhua@gmail.com)
 - 新增模板中心：数据分析 / 科研 / 办公 / 离线部署 / 诊断模板
 - 新增更新检查：自动读取 GitHub Releases 最新版本与资产下载地址
