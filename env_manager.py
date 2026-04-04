@@ -85,7 +85,7 @@ PIP_COMMON_FLAGS = [
     "--no-input",
 ]
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 GITHUB_REPO_OWNER = "wzgig"
 GITHUB_REPO_NAME = "env_tool"
 

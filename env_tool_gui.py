@@ -55,7 +55,7 @@ class EnvToolGUI:
     """EnvTool 主界面类。"""
 
     APP_NAME = "EnvTool"
-    APP_VERSION = "1.2.0"
+    APP_VERSION = "1.3.0"
     AUTHOR_NAME = "Zicheng Wang (@wzgig), Tiany Huo (@titih258)"
     AUTHOR_EMAIL = "qqiuqiuhua@gmail.com, 3377386900@qq.com"
     AUTHOR_GITHUB = "https://github.com/wzgig"
@@ -1710,34 +1710,57 @@ class EnvToolGUI:
         self._append_log("[操作] 已恢复默认参数")
 
     def _poll_log(self) -> None:
-        """主线程轮询日志队列。"""
+        """主线程轮询日志队列，引入批量处理机制以极大减轻UI线程卡顿(Lag)。"""
         if self.is_closing:
             return
 
+        items = []
         while True:
             try:
-                item = self.log_queue.get_nowait()
+                items.append(self.log_queue.get_nowait())
             except queue.Empty:
                 break
+                
+        if items:
+            self.log_text.configure(state="normal")
+            for item in items:
+                if item == "__TASK_DONE__":
+                    self.log_text.configure(state="disabled")
+                    self._set_running_state(False)
+                    if self._resolve_report_path().exists():
+                        self._refresh_report_summary()
+                    elif self.last_exit_code not in (None, 0):
+                        self.summary_var.set(f"结果摘要：任务失败，退出码 {self.last_exit_code}")
+                    else:
+                        self.summary_var.set("结果摘要：任务已结束，未生成报告")
+                    self.log_text.configure(state="normal")
+                    continue
 
-            if item == "__TASK_DONE__":
-                self._set_running_state(False)
-                if self._resolve_report_path().exists():
-                    self._refresh_report_summary()
-                elif self.last_exit_code not in (None, 0):
-                    self.summary_var.set(f"结果摘要：任务失败，退出码 {self.last_exit_code}")
+                if item.startswith("__TASK_EXIT__:"):
+                    try:
+                        self.last_exit_code = int(item.split(":", 1)[1])
+                    except Exception:
+                        self.last_exit_code = None
+                    continue
+
+                tag = None
+                up = item.upper()
+                if "FAILED" in up or "ERROR" in up or "异常" in item:
+                    tag = "err"
+                elif "WARNING" in up or "警告" in item or "跳过" in item:
+                    tag = "warn"
+                elif "[OK]" in up or "成功" in item:
+                    tag = "ok"
+                elif item.startswith("===") or item.startswith("启动命令"):
+                    tag = "title"
+
+                if tag:
+                    self.log_text.insert("end", item + "\n", tag)
                 else:
-                    self.summary_var.set("结果摘要：任务已结束，未生成报告")
-                continue
-
-            if item.startswith("__TASK_EXIT__:"):
-                try:
-                    self.last_exit_code = int(item.split(":", 1)[1])
-                except Exception:
-                    self.last_exit_code = None
-                continue
-
-            self._append_log(item)
+                    self.log_text.insert("end", item + "\n")
+                    
+            self.log_text.configure(state="disabled")
+            self.log_text.see("end")
 
         try:
             self.poll_job_id = self.root.after(self.POLL_MS, self._poll_log)
