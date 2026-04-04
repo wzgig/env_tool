@@ -197,6 +197,7 @@ class EnvToolGUI:
         self.active_page_var = tk.StringVar(value="welcome")
         self.nav_buttons: Dict[str, ttk.Button] = {}
         self.page_frames: Dict[str, ttk.Frame] = {}
+        self.scroll_canvases: Dict[str, tk.Canvas] = {}
 
         self._configure_style()
         self._build_ui()
@@ -407,6 +408,11 @@ class EnvToolGUI:
             self.badge_state_label.configure(bg=self.colors["primary"], fg="#FFFFFF")
         if hasattr(self, "badge_wrap"):
             self.badge_wrap.configure(bg=self.colors["bg"])
+        for canvas in getattr(self, "scroll_canvases", {}).values():
+            try:
+                canvas.configure(bg=self.colors["bg"])
+            except tk.TclError:
+                pass
 
     def _set_window_icon(self) -> None:
         """设置窗口图标（内置像素图标，避免外部依赖）。"""
@@ -580,21 +586,27 @@ class EnvToolGUI:
         workspace.pack(fill=tk.BOTH, expand=True)
         self.workspace = workspace
 
-        welcome_tab = ttk.Frame(workspace, style="App.TFrame", padding=8)
-        config_tab = ttk.Frame(workspace, style="App.TFrame", padding=8)
+        welcome_tab, welcome_body, welcome_canvas = self._create_scrollable_tab(workspace)
+        config_tab, config_body, config_canvas = self._create_scrollable_tab(workspace)
         run_tab = ttk.Frame(workspace, style="App.TFrame", padding=8)
         help_tab = ttk.Frame(workspace, style="App.TFrame", padding=8)
-        about_tab = ttk.Frame(workspace, style="App.TFrame", padding=8)
+        about_tab, about_body, about_canvas = self._create_scrollable_tab(workspace)
         workspace.add(welcome_tab, text="欢迎")
         workspace.add(config_tab, text="配置中心")
         workspace.add(run_tab, text="运行与日志")
         workspace.add(help_tab, text="说明书")
         workspace.add(about_tab, text="关于")
 
+        self.scroll_canvases = {
+            "welcome": welcome_canvas,
+            "config": config_canvas,
+            "about": about_canvas,
+        }
+
         self.page_frames = {"welcome": welcome_tab, "config": config_tab, "run": run_tab, "help": help_tab, "about": about_tab}
 
         # 欢迎页
-        welcome_cards = ttk.Frame(welcome_tab, style="App.TFrame")
+        welcome_cards = ttk.Frame(welcome_body, style="App.TFrame")
         welcome_cards.pack(fill=tk.BOTH, expand=True)
 
         intro = ttk.LabelFrame(welcome_cards, text="快速开始", padding=12, style="Card.TLabelframe")
@@ -657,7 +669,7 @@ class EnvToolGUI:
         self.help_text = help_text
 
         # 关于页
-        about_card = ttk.LabelFrame(about_tab, text="关于 EnvTool", padding=12, style="Card.TLabelframe")
+        about_card = ttk.LabelFrame(about_body, text="关于 EnvTool", padding=12, style="Card.TLabelframe")
         about_card.pack(fill=tk.X, pady=(0, 8))
         ttk.Label(
             about_card,
@@ -673,14 +685,14 @@ class EnvToolGUI:
             justify=tk.LEFT,
         ).pack(anchor=tk.W)
 
-        links_card = ttk.LabelFrame(about_tab, text="相关链接", padding=12, style="Card.TLabelframe")
+        links_card = ttk.LabelFrame(about_body, text="相关链接", padding=12, style="Card.TLabelframe")
         links_card.pack(fill=tk.X, pady=(0, 8))
         ttk.Button(links_card, text="作者主页", style="Soft.TButton", command=self._open_author_home).pack(side=tk.LEFT)
         ttk.Button(links_card, text="打开 GitHub 仓库", style="Soft.TButton", command=self._open_repo_home).pack(side=tk.LEFT)
         ttk.Button(links_card, text="打开 Releases", style="Soft.TButton", command=self._open_repo_releases).pack(side=tk.LEFT, padx=8)
 
         # 配置中心
-        preset_frame = ttk.LabelFrame(config_tab, text="快捷预设", padding=10, style="Card.TLabelframe")
+        preset_frame = ttk.LabelFrame(config_body, text="快捷预设", padding=10, style="Card.TLabelframe")
         preset_frame.pack(fill=tk.X, pady=(0, 8))
         ttk.Label(preset_frame, text="配置预设").pack(side=tk.LEFT)
         self.preset_box = ttk.Combobox(
@@ -694,7 +706,7 @@ class EnvToolGUI:
         ttk.Button(preset_frame, text="应用预设", command=self._on_apply_preset, style="Soft.TButton").pack(side=tk.LEFT)
         ttk.Label(preset_frame, text="（预设不会覆盖 Python 路径与报告路径）", style="Hint.TLabel").pack(side=tk.LEFT, padx=(12, 0))
 
-        basic = ttk.LabelFrame(config_tab, text="基础配置", padding=10, style="Card.TLabelframe")
+        basic = ttk.LabelFrame(config_body, text="基础配置", padding=10, style="Card.TLabelframe")
         basic.pack(fill=tk.X, pady=(0, 8))
 
         ttk.Label(basic, text="运行模式").grid(row=0, column=0, sticky=tk.W)
@@ -720,7 +732,7 @@ class EnvToolGUI:
         ttk.Button(basic, text="选择", command=self._choose_snapshot_path, style="Soft.TButton").grid(row=2, column=4, sticky=tk.W, pady=(8, 0))
         basic.columnconfigure(3, weight=1)
 
-        advanced_ext = ttk.LabelFrame(config_tab, text="扩展功能", padding=10, style="Card.TLabelframe")
+        advanced_ext = ttk.LabelFrame(config_body, text="扩展功能", padding=10, style="Card.TLabelframe")
         advanced_ext.pack(fill=tk.X, pady=(0, 8))
 
         ttk.Label(advanced_ext, text="wheel 仓库目录（offline）").grid(row=0, column=0, sticky=tk.W)
@@ -743,7 +755,7 @@ class EnvToolGUI:
 
         advanced_ext.columnconfigure(1, weight=1)
 
-        option_wrap = ttk.Frame(config_tab, style="App.TFrame")
+        option_wrap = ttk.Frame(config_body, style="App.TFrame")
         option_wrap.pack(fill=tk.X, pady=(0, 8))
 
         groups = ttk.LabelFrame(option_wrap, text="任务分组", padding=10, style="Card.TLabelframe")
@@ -788,7 +800,7 @@ class EnvToolGUI:
         ttk.Label(timeout_retry, text=" 次").pack(side=tk.LEFT)
         advanced.columnconfigure(1, weight=1)
 
-        preview = ttk.LabelFrame(config_tab, text="命令预览（执行前可确认）", padding=8, style="Card.TLabelframe")
+        preview = ttk.LabelFrame(config_body, text="命令预览（执行前可确认）", padding=8, style="Card.TLabelframe")
         preview.pack(fill=tk.X, pady=(0, 8))
         ttk.Entry(preview, textvariable=self.preview_var, state="readonly").pack(fill=tk.X)
 
@@ -842,6 +854,36 @@ class EnvToolGUI:
 
         workspace.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
+    def _create_scrollable_tab(self, workspace: ttk.Notebook) -> tuple[ttk.Frame, ttk.Frame, tk.Canvas]:
+        """创建带竖向滚动条的页面容器。"""
+        tab = ttk.Frame(workspace, style="App.TFrame")
+
+        canvas = tk.Canvas(
+            tab,
+            bg=self.colors["bg"],
+            highlightthickness=0,
+            borderwidth=0,
+            relief=tk.FLAT,
+        )
+        scrollbar = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        body = ttk.Frame(canvas, style="App.TFrame", padding=8)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _refresh_scroll_region(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _sync_body_width(event) -> None:
+            canvas.itemconfigure(body_window, width=event.width)
+
+        body.bind("<Configure>", _refresh_scroll_region)
+        canvas.bind("<Configure>", _sync_body_width)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        return tab, body, canvas
+
     def _bind_events(self) -> None:
         """绑定变量变化与快捷键。"""
         tracked = [
@@ -873,6 +915,26 @@ class EnvToolGUI:
         self.root.bind("<Control-r>", lambda _e: self._run())
         self.root.bind("<Control-l>", lambda _e: self._clear_log())
         self.root.bind("<Control-s>", lambda _e: self._export_log())
+        self.root.bind("<MouseWheel>", self._on_root_mousewheel)
+
+    def _on_root_mousewheel(self, event) -> str | None:
+        canvas = self.scroll_canvases.get(self.active_page_var.get())
+        if not canvas:
+            return None
+
+        delta = event.delta
+        if delta == 0:
+            return None
+
+        step = -(delta // 120)
+        if step == 0:
+            step = -1 if delta > 0 else 1
+
+        try:
+            canvas.yview_scroll(step, "units")
+            return "break"
+        except tk.TclError:
+            return None
 
     def _settings_path(self) -> Path:
         """返回用户配置保存路径。"""
